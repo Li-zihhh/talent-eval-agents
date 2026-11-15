@@ -1,3 +1,14 @@
+"""人才工具模块 - 提供 LangChain Tool 封装的人力资源查询和评估工具。
+
+核心工具：
+    search_candidates: 根据过滤条件搜索候选人
+    get_candidate_profile: 获取候选人完整档案
+    list_jobs: 列出可用的岗位描述
+    generate_evaluation_dimensions: 为指定岗位和候选人生成评估维度
+
+使用 TalentToolService 统一管理工具执行上下文和审计日志。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -41,6 +52,7 @@ class TransientToolError(RuntimeError):
 
 
 class InMemoryAuditSink:
+    """内存审计日志记录器。"""
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
 
@@ -49,6 +61,7 @@ class InMemoryAuditSink:
 
 
 class SqlAuditSink:
+    """SQL 数据库审计日志记录器。"""
     def __init__(self, session_factory: Callable[[], Session]) -> None:
         self.session_factory = session_factory
 
@@ -59,6 +72,7 @@ class SqlAuditSink:
 
 
 class CircuitBreaker:
+    """熔断器模式实现，用于防止工具调用失败导致系统崩溃。"""
     def __init__(self, *, failure_threshold: int = 3, recovery_seconds: float = 30) -> None:
         self.failure_threshold = failure_threshold
         self.recovery_seconds = recovery_seconds
@@ -112,6 +126,7 @@ class ToolExecutor:
         context: TalentToolContext,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行指定工具操作，记录调用信息并处理异常。"""
         call_id = str(uuid4())
         started = time.monotonic()
         policy = self.tool_policies.get(name, self.policy)
@@ -207,6 +222,7 @@ class ToolExecutor:
         self, name, call_id, context, arguments, started, attempts, status,
         *, data=None, error=None, degraded=False,
     ) -> dict[str, Any]:
+        """记录工具调用结果并返回响应。"""
         meta = {
             "tool_name": name,
             "call_id": call_id,
@@ -298,6 +314,31 @@ class TalentToolService:
                     JobDescription.job_code == job_code,
                     JobDescription.tenant_id == context.tenant_id,
                     JobDescription.status == "active",
+                )
+            )
+        if row is None:
+            return None
+        return {
+            "job_code": row.job_code,
+            "name": row.name,
+            "version": row.version,
+            "content": row.content,
+        }
+
+    def get_job_description_by_version(
+        self,
+        job_code: str,
+        version: int,
+        *,
+        context: TalentToolContext,
+    ) -> dict[str, Any] | None:
+        self._check_context(context)
+        with self.session_factory() as db:
+            row = db.scalar(
+                select(JobDescription).where(
+                    JobDescription.job_code == job_code,
+                    JobDescription.tenant_id == context.tenant_id,
+                    JobDescription.version == version,
                 )
             )
         if row is None:
@@ -425,7 +466,7 @@ def build_candidate_provider(
     *,
     compile_filters: Callable[[str], list[FilterCondition]],
 ):
-    """Adapt the lesson 12 structured filter service to the lesson 11 graph contract."""
+    """将结构化筛选服务适配为图合约。"""
     def provider(request: dict[str, Any], decision_context: Any) -> list[str]:
         context = TalentToolContext(
             tenant_id=decision_context.tenant_id,

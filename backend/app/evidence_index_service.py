@@ -1,3 +1,12 @@
+"""证据索引服务模块 - 将文档分块的文本向量化后写入 Milvus 向量数据库。
+
+核心流程：
+    1. 查询待索引的分块（ChunkingRun 已完成的分块）。
+    2. 使用 Embedding 模型生成向量。
+    3. 批量写入 Milvus Evidence Collection。
+    4. 记录索引任务状态到 EvidenceIndexJob 表。
+"""
+
 from __future__ import annotations
 
 import hashlib

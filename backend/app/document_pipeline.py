@@ -1,3 +1,13 @@
+"""文档处理流水线模块 - 编排文档从上传到完成索引的完整异步流程。
+
+流程阶段：
+    1. 解析完成回调 (on_parse_completed) -> 自动触发分块
+    2. 分块完成回调 (on_chunking_completed) -> 自动触发证据索引
+    3. 每阶段更新对应的任务状态表
+
+使用 Redis 队列解耦各阶段，支持异步事件驱动。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

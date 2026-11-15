@@ -1,4 +1,9 @@
-"""Resolve citations through current PostgreSQL permissions, never index metadata."""
+"""证据引用解析模块 - 通过 PostgreSQL 数据库解析分块引用的权限和可访问性。
+
+根据分块 ID 查询完整的文档链条（Chunk -> Version -> Document），
+验证租户归属和权限范围，返回可安全展示的引用信息。
+"""
+
 from uuid import UUID
 from fastapi import HTTPException
 from app.models import Document, DocumentVersion, DocumentChunk, ChunkingRun, ParseJob, KnowledgeBase
@@ -6,6 +11,11 @@ from app.models import Document, DocumentVersion, DocumentChunk, ChunkingRun, Pa
 
 def resolve_citation(db, chunk_id: UUID, *, tenant_id: str, permission_scopes: list[str],
         quote_start: int | None = None, quote_end: int | None = None):
+    """解析分块引用：验证权限并返回带定位信息的引用数据。
+    
+    通过 chunk_id 向上追溯完整链路：DocumentChunk -> DocumentVersion -> Document，
+    确保引用所属文档在租户和权限范围内。
+    """
     def unavailable():
         raise HTTPException(404, '引用不可用或无访问权限')
     chunk = db.get(DocumentChunk, chunk_id)
@@ -48,7 +58,7 @@ def resolve_citation(db, chunk_id: UUID, *, tenant_id: str, permission_scopes: l
 
 
 def load_pack_sources(db, chunks, *, tenant_id, permission_scopes):
-    """Rehydrate trusted text and optionally add same-version parent context."""
+    """加载证据来源，包括当前版本和父版本。"""
     sources = {}
     for hit in chunks:
         try:

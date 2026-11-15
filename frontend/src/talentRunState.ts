@@ -23,6 +23,7 @@ export type RunStep = {
 
 export type Citation = {
   ref: string;
+  chunk_id?: string;
   candidate?: string;
   document?: string;
   quote: string;

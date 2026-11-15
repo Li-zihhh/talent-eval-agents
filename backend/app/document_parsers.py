@@ -1,3 +1,14 @@
+"""文档解析器聚合模块 - 统一入口，根据文件类型选择合适解析器。
+
+支持的解析引擎：
+    - Native: MD/XLSX/PPTX（使用项目自研解析器）
+    - LangChain: CSV/JSON/HTML/DOCX（使用社区加载器）
+    - MinerU: PDF/图片（使用远程 MinerU 服务）
+    - Whisper: 音频（使用语音转文字模型）
+
+解析结果统一封装为 ParseResult 数据类。
+"""
+
 import json
 import re
 from dataclasses import dataclass, field
@@ -11,13 +22,15 @@ from langchain_community.document_loaders import BSHTMLLoader, CSVLoader, JSONLo
 
 from app.parsers import parse_xlsx, parse_pptx
 
+# 懒加载 Whisper 模型（音频转文字）
 _whisper_model = None
 
 
 @dataclass(slots=True)
 class ParseResult:
-    parser_name: str
-    text: str
+    """统一的文档解析结果。"""
+    parser_name: str             # 解析器名称
+    text: str                    # 纯文本/Markdown 内容
     metadata: dict[str, Any] = field(default_factory=dict)
     structured: dict[str, Any] | None = None
 

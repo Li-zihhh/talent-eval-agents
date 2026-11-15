@@ -1,4 +1,12 @@
-"""Raw Cases and problem signals in the existing course-demo application."""
+"""评估用例 API 模块 - 管理评估数据集、标注和回放结果的 REST 接口。
+
+提供端点：
+    - 数据集项的 CRUD 和批量导入
+    - 人工标注（Golden 答案）
+    - 模块回放和裁判评分
+    - 评分结果聚合统计
+"""
+
 from typing import Literal
 from datetime import datetime
 from types import SimpleNamespace

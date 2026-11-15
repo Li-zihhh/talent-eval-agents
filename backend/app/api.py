@@ -1,3 +1,15 @@
+"""REST API 路由模块 - 提供文档管理、搜索、解析和评估等全部 HTTP 接口。
+
+主要端点分组：
+    文档管理: POST /api/documents, DELETE /api/documents/{id}, GET /api/documents/{id}/versions
+    解析与分块: POST /api/documents/{id}/parse, GET /api/documents/{id}/chunks
+    向量检索: POST /api/search/evidence（混合检索 + 重排序）
+    证据抽取: POST /api/evidence/extract（事实抽取 + 证据包构建）
+    候选人/岗位: GET /api/candidates, GET /api/jobs
+    评估预览: POST /api/evaluate（快速评估预览）
+    健康检查: GET /api/health
+"""
+
 import logging
 from datetime import date
 from typing import Literal

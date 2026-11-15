@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: docker.1ms.run/postgres:15-alpine
+    image: postgres:15-alpine
     environment:
       POSTGRES_DB: talent_docs
       POSTGRES_USER: talent
@@ -23,8 +23,8 @@ services:
       MINIO_ROOT_USER: talent_minio
       MINIO_ROOT_PASSWORD: talent_minio_password
     ports:
-      - "127.0.0.1:19000:9000"
-      - "127.0.0.1:19001:9001"
+      - "19000:9000"
+      - "19001:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -34,7 +34,7 @@ services:
       retries: 20
 
   redis:
-    image: docker.1ms.run/redis:6-alpine
+    image: redis:6-alpine
     ports:
       - "127.0.0.1:16379:6379"
     healthcheck:
@@ -46,7 +46,7 @@ services:
   mineru:
     build: ./backend/mineru-runtime
     ports:
-      - "127.0.0.1:18001:18001"
+      - "18001:18001"
     volumes:
       - mineru_models:/root/.cache
     environment:
@@ -66,13 +66,13 @@ services:
       DATABASE_URL: postgresql+psycopg://talent:talent_dev_password@postgres:5432/talent_docs
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://127.0.0.1:19000
+      S3_PUBLIC_ENDPOINT_URL: http://192.168.100.129:19000
       S3_ACCESS_KEY: talent_minio
       S3_SECRET_KEY: talent_minio_password
       S3_BUCKET: talent-documents
       MINERU_URL: http://mineru:18001
     ports:
-      - "127.0.0.1:18080:18080"
+      - "18080:18080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,7 +91,7 @@ services:
       DATABASE_URL: postgresql+psycopg://talent:talent_dev_password@postgres:5432/talent_docs
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://127.0.0.1:19000
+      S3_PUBLIC_ENDPOINT_URL: http://192.168.100.129:19000
       S3_ACCESS_KEY: talent_minio
       S3_SECRET_KEY: talent_minio_password
       S3_BUCKET: talent-documents
@@ -103,7 +103,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "127.0.0.1:15173:80"
+      - "15173:80"
     depends_on:
       - backend
 

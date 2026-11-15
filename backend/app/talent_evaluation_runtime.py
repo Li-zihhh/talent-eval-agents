@@ -1,3 +1,12 @@
+"""人才评估运行时装配模块 - 初始化所有依赖并构建评估子图。
+
+负责将模型、向量存储、重排序器等基础设施注入评估流水线：
+    - evaluation graph: 评估维度生成 + 并行证据检索与评估
+    - report graph: 评估报告合成
+
+所有依赖（ChatModel、Embedding、Reranker、MilvusStore）在此统一初始化。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -29,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_runtime_graph():
+    """构建人才评估运行时图，包含评估维度生成、并行证据检索与评估、评估报告合成等子图。"""
     logger.info(
         "event=runtime_graph_build_started function=build_runtime_graph"
     )
@@ -44,6 +54,7 @@ def build_runtime_graph():
     store = get_evidence_store()
 
     def search(*, query, candidate_ids, tenant_id, permission_scopes):
+        """执行混合搜索，返回与查询最相关的8个的证据包。"""
         logger.info(
             "event=hybrid_search_started function=search candidate_ids=%s "
             "query_chars=%s permission_scope_count=%s limit=8 rerank_top_n=20",
@@ -70,6 +81,7 @@ def build_runtime_graph():
         return results
 
     def load_sources(chunks, *, tenant_id, permission_scopes):
+        """从数据库加载证据包的来源信息。"""
         logger.info(
             "event=source_loading_started function=load_sources "
             "requested_chunk_count=%s chunk_ids=%s permission_scope_count=%s",
@@ -90,6 +102,11 @@ def build_runtime_graph():
         )
         return sources
 
+    # 装配人才工具服务，作为评估分支 worker 的统一入口。
+    # 注入证据提供者，其内部封装了"混合检索 → 来源加载 → LLM 事实提取"
+    # 三步流水线：search 负责 Milvus 向量检索 + 重排序，
+    # load_sources 负责数据库原文加载 + 权限二次鉴权，
+    # extract 负责调用 LLM 从原文提取结构化证据事实（最多重试 3 次）。
     service = TalentToolService(
         session_factory=SessionLocal,
         evidence_provider=build_branch_evidence_provider(
@@ -127,6 +144,7 @@ def build_runtime_graph():
 
 
 def build_report_runtime_graph():
+    """构建人才评估报告运行时图，包含评估维度评分、一致性检查、报告生成等子图。"""
     logger.info(
         "event=report_runtime_graph_build_started "
         "function=build_report_runtime_graph"
@@ -148,6 +166,20 @@ def build_report_runtime_graph():
     return runtime_graph
 
 
-# Agent Server loads this compiled graph through langgraph.json.
-graph = build_runtime_graph()
-report_graph = build_report_runtime_graph()
+# Module-level lazy graph singletons.
+_graph = None
+_report_graph = None
+
+
+def __getattr__(name: str):
+    if name == "graph":
+        global _graph
+        if _graph is None:
+            _graph = build_runtime_graph()
+        return _graph
+    if name == "report_graph":
+        global _report_graph
+        if _report_graph is None:
+            _report_graph = build_report_runtime_graph()
+        return _report_graph
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

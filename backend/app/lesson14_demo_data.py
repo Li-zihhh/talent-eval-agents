@@ -1,3 +1,9 @@
+"""示例数据填充模块 - 导入演示用的岗位描述 (JobDescription) 数据。
+
+在开发环境中用于初始化数据库中的示例岗位数据，
+支持幂等插入（重复键则更新）。
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
@@ -15,6 +21,17 @@ def seed_job_descriptions(
     *,
     session_factory: Callable[[], Session] = SessionLocal,
 ) -> dict[str, int]:
+    """将岗位描述记录批量写入数据库。
+    
+    如果 job_code 已存在则执行更新，否则执行插入。
+    
+    Args:
+        records: 岗位描述字典列表。
+        session_factory: 数据库会话工厂。
+        
+    Returns:
+        包含 inserted 和 updated 计数的字典。
+    """
     inserted = 0
     updated = 0
     with session_factory() as db:

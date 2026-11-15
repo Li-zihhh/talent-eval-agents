@@ -1,0 +1,80 @@
+﻿{
+  "status": "branches_ready",
+  "candidate_ids": ["candidate_001", "candidate_002"],
+
+  "dimensions": [
+    {
+      "name": "RAG项目落地经验",                   // ← 维度名称
+      "definition": "评估候选人是否具备...",
+      "weight_percent": 40,                       // ← 权重(百分比)
+      "evidence_requirements": [                   // ← 证据要求(逐条并行检索)
+        "有RAG系统设计与实现经验",
+        "使用过向量数据库和检索引擎"
+      ],
+      "score_anchors": [                           // ← 评分锚点(0/3/5分)
+        {"score": 0, "description": "无任何RAG项目经验"},
+        {"score": 3, "description": "参与过RAG项目"},
+        {"score": 5, "description": "主导过RAG项目落地"}
+      ],
+      "retrieval_hints": ["RAG 向量检索 知识库"],   // ← 检索关键词(拼入query)
+      "source_requirement_ids": ["S1"]             // ← 来源需求编号
+    }
+  ],
+
+  "work_items": [
+    {
+      "task_id": "candidate_001:1",         // 标识候选人与维度组合
+      "candidate_id": "candidate_001",
+      "dimension_number": 1
+    }
+  ],
+
+  "branch_results": [                                // ★ 核心产出 ★
+    {
+      "task_id": "candidate_001:1",
+      "candidate_id": "candidate_001",
+      "dimension_number": 1,
+      "execution_status": "succeeded",               // ─ 分支状态 ─
+
+      "requirements": [                              // ─ 证据要求结果(每条一个) ─
+        {
+          "requirement_id": "1:1",                   //   维度编号:序号
+          "query": "RAG 向量检索 有RAG系统设计...",     //   实际检索query
+          "status": "sufficient",                    //   证据充分性判定
+          "reason": "证据显示候选人主导了RAG从0到1",    //   LLM判定理由
+          "extraction_status": "succeeded",          //   事实提取是否成功
+
+          "facts": [                                 // ─ LLM提取的结构化事实 ─
+            {
+              "event": "企业知识库RAG系统",            //   项目/事项名称
+              "period": "2024-03/2024-09",           //   时间周期
+              "claim": "主导了RAG系统设计与落地",       //   可判定命题
+              "answer": "yes",                       //   yes|no
+              "sources": [                           // ─ 原文出处 ─
+                {
+                  "citation_id": "cit_abc123",
+                  "chunk_id": "550e8400-...",        //   分块唯一标识
+                  "quote": "负责企业知识库RAG...",     //   原文引用
+                  "quote_start": 42,
+                  "quote_end": 87,
+                  "source_label": "绩效报告.pdf"       //   来源文档名
+                }
+              ]
+            }
+          ],
+          "conflicts": [],                           //   冲突事实索引对
+          "missing_information": [],                 //   缺失信息
+          "citations": [                             //   证据引用鏈
+            {"citation_id": "cit_abc123", "chunk_id": "550e8400-...", "source_label": "绩效报告.pdf"}
+          ]
+        }
+      ],
+      "tool_call_ids": ["uuid-call-1"],              // ─ 审计追踪 ─
+      "error_code": null,
+      "error_message": null
+    }
+  ],
+  "required_work_items": 6,
+  "work_item_limit": 24,
+  "errors": []
+}

@@ -1,3 +1,10 @@
+"""文档清理模块 - 级联删除文档及其所有关联资源。
+
+删除链路：EvidenceIndexJob -> DocumentChunk -> ChunkingRun -> ParseArtifact -> ParseJob -> FileObject -> DocumentVersion -> DocumentMetadata -> Document
+
+在数据库事务中按依赖顺序逐级删除，确保不留下孤儿记录。
+"""
+
 from __future__ import annotations
 
 from uuid import UUID

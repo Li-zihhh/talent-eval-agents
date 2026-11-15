@@ -1,3 +1,14 @@
+"""评估用例录制模块 - 在真实模块调用边界捕获快照，支持后续回放和裁判评估。
+
+核心组件：
+    EvaluationCaseDraft: 可回放的模块调用快照数据模型。
+    SqlEvaluationCaseStore: 将模块调用记录持久化到 PostgreSQL。
+    capture_call/current_extraction_scope: 上下文管理工具，用于在运行时截获调用数据。
+
+流程：在实际执行过程中，通过 ContextVar 注入捕获上下文，
+模块调用时自动录制输入/输出，写入 EvaluationCaseRecord 表。
+"""
+
 from __future__ import annotations
 
 from enum import StrEnum
@@ -13,6 +24,7 @@ from app.models import EvaluationCaseRecord
 
 
 class EvaluationModule(StrEnum):
+    """可被录制的评估模块枚举。"""
     REQUEST_UNDERSTANDING = "request_understanding"
     JOB_MATCHING = "job_matching"
     DIMENSION_GENERATION = "dimension_generation"
@@ -20,34 +32,39 @@ class EvaluationModule(StrEnum):
 
 
 class EvaluationCaseDraft(BaseModel):
-    """A replayable snapshot captured at a real module invocation boundary."""
+    """在真实模块调用边界捕获的可回放快照。"""
 
     schema_version: Literal["1.0"] = "1.0"
-    source_run_id: str
-    conversation_id: str
-    turn_no: int
-    module_key: EvaluationModule
-    input_payload: dict[str, Any]
-    output_payload: dict[str, Any]
-    replay_context: dict[str, Any] = Field(default_factory=dict)
-    version_snapshot: dict[str, str] = Field(default_factory=dict)
-    status: Literal["succeeded", "failed"] = "succeeded"
-    error_code: str | None = None
-    duration_ms: int | None = None
+    source_run_id: str                        # 来源运行 ID
+    conversation_id: str                      # 对话 ID
+    turn_no: int                              # 对话轮次
+    module_key: EvaluationModule              # 模块标识
+    input_payload: dict[str, Any]             # 模块输入
+    output_payload: dict[str, Any]            # 模块输出
+    replay_context: dict[str, Any] = Field(default_factory=dict)  # 回放需要的上下文
+    version_snapshot: dict[str, str] = Field(default_factory=dict)  # 版本快照
+    status: Literal["succeeded", "failed"] = "succeeded"  # 执行状态
+    error_code: str | None = None             # 失败时的错误码
+    duration_ms: int | None = None            # 执行耗时（毫秒）
 
 
 class SqlEvaluationCaseStore:
-    """Persist raw module calls without adding labels or golden answers."""
+    """将原始模块调用持久化存储（不添加标签或金标答案）。"""
 
     def __init__(self, session_factory: sessionmaker) -> None:
         self._session_factory = session_factory
 
     def record(self, draft: EvaluationCaseDraft) -> EvaluationCaseRecord:
+        """将一次模块调用记录写入数据库。
+
+        使用 PostgreSQL 事务锁防止并发写入时的唯一键冲突。
+        """
         with self._session_factory() as session:
             if session.bind.dialect.name == "postgresql":
+                # 事务锁，防止并发写入时出现唯一键冲突
                 lock_key = int.from_bytes(sha256(
                     f"{draft.source_run_id}:{draft.module_key.value}".encode()
-                ).digest()[:8], "big", signed=True) # 事务锁，防止并发写入时出现唯一键冲突
+                ).digest()[:8], "big", signed=True)
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
             last_no = session.scalar(
                 select(func.max(EvaluationCaseRecord.invocation_no)).where(
@@ -80,8 +97,15 @@ def recent_request_messages(
     *,
     previous_turn_limit: int = 3,
 ) -> list[AnyMessage]:
-    """Return the current turn and at most the configured previous turns."""
+    """返回当前轮次及最近的 N 轮历史消息。
 
+    Args:
+        messages: 完整消息列表。
+        previous_turn_limit: 保留的历史轮次数。
+
+    Returns:
+        截断后的消息列表。
+    """
     if previous_turn_limit < 0:
         raise ValueError("previous_turn_limit 不能小于 0")
     return list(messages[-(previous_turn_limit + 1) :])
@@ -103,6 +127,7 @@ def build_request_understanding_case(
     error_code: str | None = None,
     duration_ms: int | None = None,
 ) -> EvaluationCaseDraft:
+    """构建请求理解阶段的评估用例快照。"""
     recent_messages = recent_request_messages(messages)
     return EvaluationCaseDraft(
         source_run_id=source_run_id,
@@ -130,19 +155,25 @@ def build_request_understanding_case(
     )
 
 
-# Each extraction thread enters its own scope; no mutable global Run identity.
+# ── 捕获上下文管理 ──
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from time import perf_counter
 import logging
 
+# 线程安全的捕获上下文变量
 _capture_scope = ContextVar('evaluation_capture_scope', default=None)
 logger = logging.getLogger(__name__)
 
 
 @contextmanager
 def extraction_scope(context, **identity):
+    """进入事实抽取的评估用例捕获作用域。
+
+    在此上下文内执行的事实抽取调用会被自动录制。
+    """
     token = _capture_scope.set((context, identity))
     try:
         yield
@@ -165,6 +196,7 @@ def safe_record(recorder, draft):
 
 def capture_call(call, *, context, module_key, input_payload, recorder=None,
                  version_snapshot=None, replay_extra=None):
+    """捕获评估用例调用。"""
     if context is None or not context.run_id:
         return call()
     if recorder is None:

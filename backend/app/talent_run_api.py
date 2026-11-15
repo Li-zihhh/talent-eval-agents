@@ -1,3 +1,12 @@
+"""人才评估运行 API 模块 - 提供评估运行的创建、恢复和 SSE 流式结果接口。
+
+API 端点：
+    POST /api/runs: 创建评估运行并返回 SSE 流
+    POST /api/runs/{run_id}/resume: 恢复被中断的运行
+    GET /api/runs/{run_id}/events: 查询历史运行事件
+    GET /api/conversations/{id}: 查询对话详情
+"""
+
 from __future__ import annotations
 
 import json

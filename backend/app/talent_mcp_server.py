@@ -1,23 +1,39 @@
+"""MCP 工具服务模块 - 通过 Model Context Protocol 暴露人才评估工具给外部 Agent。
+
+模块：
+    MCPServer: 使用 MCP 标准协议注册工具端点。
+    TokenVerifier: 基于令牌的身份验证。
+
+暴露的工具包括：
+    - 候选人搜索 (search_candidates)
+    - 候选人详情获取 (get_candidate_profile)
+    - 岗位查询 (list_jobs)
+    - 评估维度生成 (generate_evaluation_dimensions)
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Annotated, Any
 
+import logging
 from mcp.server import MCPServer
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from app.query_plan import FilterCondition
 from app.talent_tools import TalentToolContext, TalentToolService, ToolExecutor
 
-
+logger = logging.getLogger(__name__)
 ContextProvider = Callable[[], TalentToolContext]
 
 
 def talent_context_from_token(token: AccessToken) -> TalentToolContext:
+    """从 MCP Access Token 中提取人才工具上下文。"""
     claims = token.claims or {}
     tenant_id = str(claims.get("tenant_id", "")).strip()
     raw_permission_scopes = claims.get("permission_scopes", [])
@@ -39,6 +55,7 @@ def talent_context_from_token(token: AccessToken) -> TalentToolContext:
 
 
 def authenticated_talent_context() -> TalentToolContext:
+    """获取当前请求的认证人才工具上下文。"""
     token = get_access_token()
     if token is None:
         raise PermissionError("缺少经过验证的 MCP Access Token")
@@ -53,6 +70,7 @@ def build_talent_mcp_server(
     token_verifier: TokenVerifier | None = None,
     auth: AuthSettings | None = None,
 ) -> MCPServer:
+    """构建 MCP 工具服务。"""
     server = MCPServer(
         "Talent Capability Service",
         version="13.1.0",
@@ -75,7 +93,15 @@ def build_talent_mcp_server(
             arguments={"query": query, "limit": limit},
         )
 
-    @server.tool(structured_output=True)
+    @server.tool(
+        structured_output=True,
+        annotations=ToolAnnotations(
+            title="筛选候选人",
+            read_only_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+    )
     def filter_candidates(
         filters: Annotated[list[FilterCondition], Field(max_length=20)],
     ) -> dict[str, Any]:
@@ -127,6 +153,21 @@ def build_talent_mcp_server(
         return item
 
     @server.resource(
+        "talent://jobs/{job_code}/versions/{version}",
+        title="岗位 JD 指定版本",
+        mime_type="application/json",
+    )
+    def job_description_version(job_code: str, version: str) -> dict[str, Any]:
+        item = service.get_job_description_by_version(
+            job_code,
+            int(version),
+            context=context_provider(),
+        )
+        if item is None:
+            raise ResourceNotFoundError("岗位 JD 指定版本不存在或当前身份无权访问")
+        return item
+
+    @server.resource(
         "talent://candidates/{candidate_id}/profile",
         title="候选人基础档案",
         mime_type="application/json",
@@ -149,4 +190,5 @@ def build_talent_mcp_server(
     def talent_assessment(job_code: str, request_text: str) -> str:
         return f"按照岗位 {job_code} 处理人才评估与推荐请求：{request_text}"
 
+    logger.info("MCP 工具服务已启动")
     return server

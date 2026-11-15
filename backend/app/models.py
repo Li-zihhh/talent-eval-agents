@@ -1,3 +1,16 @@
+"""SQLAlchemy ORM 数据模型模块 - 定义全部数据表的映射类。
+
+核心表分组：
+    文档处理: Document, DocumentVersion, FileObject, ParseJob, ParseArtifact, DocumentChunk, ChunkingRun
+    证据索引: EvidenceIndexJob
+    人力资源: EmployeeProfile, JobDescription
+    评估与运行: TalentConversationRecord, TalentRunRecord, TalentRunStepRecord, ToolCallAudit
+    评估测试: EvaluationCaseRecord, EvaluationAnnotationRecord, EvaluationDatasetItemRecord, EvaluationFeedbackRecord
+    状态枚举: DocumentStatus, ParseStatus, ChunkingStatus, IndexStatus
+
+所有模型继承自 sqlalchemy.orm.DeclarativeBase。
+"""
+
 from datetime import date, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -7,16 +20,19 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
+    """所有 ORM 模型的声明式基类。"""
     pass
 
 
 class DocumentStatus(StrEnum):
+    """文档生命周期状态。"""
     ACTIVE = "active"
     INACTIVE = "inactive"
     DELETED = "deleted"
 
 
 class ParseStatus(StrEnum):
+    """文档解析任务状态。"""
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
@@ -25,6 +41,7 @@ class ParseStatus(StrEnum):
 
 
 class ChunkingStatus(StrEnum):
+    """文档分块任务状态。"""
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
@@ -32,6 +49,7 @@ class ChunkingStatus(StrEnum):
 
 
 class IndexStatus(StrEnum):
+    """证据索引任务状态。"""
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
@@ -39,11 +57,13 @@ class IndexStatus(StrEnum):
 
 
 class ChunkStrategyName(StrEnum):
+    """分块策略名称枚举。"""
     RECURSIVE = "recursive"
     MARKDOWN = "markdown"
 
 
 class EmployeeProfile(Base):
+    """员工档案表 - 存储候选人基本信息。"""
     __tablename__ = "employee_profiles"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -63,6 +83,7 @@ class EmployeeProfile(Base):
 
 
 class JobDescription(Base):
+    """岗位描述表 - 存储招聘岗位的职责和要求。"""
     __tablename__ = "job_descriptions"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -77,6 +98,7 @@ class JobDescription(Base):
 
 
 class ToolCallAudit(Base):
+    """工具调用审计表 - 记录每次 LangChain Tool 调用的追踪信息。"""
     __tablename__ = "tool_call_audits"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)

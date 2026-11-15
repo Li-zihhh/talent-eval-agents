@@ -1,3 +1,10 @@
+"""查询计划模块 - 将自然语言人才查询转换为结构化的数据库查询条件。
+
+支持两种任务类型：
+    find_talent: 根据多维过滤条件（层级、序列、技能、时间）筛选候选人。
+    lookup_profile: 根据 ID 精确查找员工档案。
+"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -13,11 +20,13 @@ from app.models import EmployeeProfile
 
 
 class TaskType(StrEnum):
+    """查询任务类型枚举。"""
     FIND_TALENT = "find_talent"
     LOOKUP_PROFILE = "lookup_profile"
 
 
 class FilterField(StrEnum):
+    """员工档案支持的过滤字段枚举。"""
     AGE = "age"
     REGION = "region"
     DEPARTMENT = "department"
@@ -28,6 +37,7 @@ class FilterField(StrEnum):
 
 
 class FilterCondition(BaseModel):
+    """数据库查询条件模型。"""
     field: FilterField = Field(description="结构化人才字段，只能使用 FilterField 枚举中的值")
     operator: Literal["eq", "in", "lt", "lte", "gt", "gte"] = Field(
         description="比较操作符：eq 等于，in 属于集合，lt/lte/gt/gte 为数值比较"
@@ -47,17 +57,20 @@ class FilterCondition(BaseModel):
 
 
 class SemanticRequirement(BaseModel):
+    """语义要求模型。"""
     requirement_id: str = Field(pattern=r"^S\d+$", description="语义要求编号，如 S1、S2")
     query: str = Field(min_length=1, max_length=500, description="需要在人才材料中检索的经历、技能或成果要求")
     required: bool = Field(default=True, description="用户是否把该语义要求表达为必须条件")
 
 
 class Clarification(BaseModel):
-    expression: str
-    reason: str
+    """澄清模型。"""
+    expression: str = Field(description="用户原话中提取的表达式，如 '年龄大于 30 岁'")
+    reason: str = Field(description="澄清表达式的原因，如 '年龄大于 30 岁' 是因为用户需要筛选出年龄大于 30 岁的候选人")
 
 
 class QueryPlan(BaseModel):
+    """查询计划模型。"""
     task_type: TaskType = Field(description="查询任务类型，用于选择后续执行器")
     filters: list[FilterCondition] = Field(default_factory=list, description="可由 PostgreSQL 精确执行的结构化硬条件")
     semantic_requirements: list[SemanticRequirement] = Field(default_factory=list, description="需要调用混合检索寻找材料证据的条件")
@@ -70,6 +83,7 @@ class QueryPlan(BaseModel):
 
 
 def _age_boundary(value: int, today: date) -> date:
+    """根据年龄计算边界日期，考虑闰年。"""
     try:
         return today.replace(year=today.year - value)
     except ValueError:
@@ -78,12 +92,14 @@ def _age_boundary(value: int, today: date) -> date:
 
 @dataclass(frozen=True)
 class FilterFieldSpec:
+    """数据库查询条件字段规格模型。"""
     description: str
     operators: frozenset[str]
     build: Callable[[FilterCondition, date], Any]
 
 
 def _column_spec(column: Any, description: str, operators: set[str]) -> FilterFieldSpec:
+    """根据数据库列和操作符集合创建数据库查询条件字段规格。"""
     def build(item: FilterCondition, _: date):
         value = item.value
         return {
@@ -99,13 +115,14 @@ def _column_spec(column: Any, description: str, operators: set[str]) -> FilterFi
 
 
 def _age_spec(item: FilterCondition, today: date):
+    """根据年龄计算边界日期，考虑闰年。"""
     if item.operator not in {"lt", "lte", "gt", "gte"}:
         raise ValueError("age 只支持 lt、lte、gt、gte")
     boundary = _age_boundary(int(item.value), today)
     reversed_operator = {"lt": ">", "lte": ">=", "gt": "<", "gte": "<="}[item.operator]
     return EmployeeProfile.birth_date.op(reversed_operator)(boundary)
 
-
+"""数据库查询条件字段规格注册表。"""
 FILTER_FIELD_REGISTRY = {
     FilterField.AGE: FilterFieldSpec("年龄，由 birth_date 按查询基准日换算", frozenset({"lt", "lte", "gt", "gte"}), _age_spec),
     FilterField.REGION: _column_spec(EmployeeProfile.region, "工作地区", {"eq", "in"}),
@@ -118,6 +135,7 @@ FILTER_FIELD_REGISTRY = {
 
 
 def filter_dsl_catalog() -> str:
+    """生成数据库查询条件字段规格目录。"""
     return "\n".join(
         f"- {field.value}: {spec.description}; operators={','.join(sorted(spec.operators))}"
         for field, spec in FILTER_FIELD_REGISTRY.items()
@@ -127,6 +145,7 @@ def filter_dsl_catalog() -> str:
 def build_candidate_statement(
     plan: QueryPlan, *, tenant_id: str, today: date | None = None
 ) -> Select[tuple[str]]:
+    """根据查询计划构建候选员工 ID 查询语句。"""
     if not tenant_id:
         raise ValueError("tenant_id 不能为空")
     if not plan.executable:
@@ -147,6 +166,7 @@ def build_candidate_statement(
 
 
 def select_candidate_ids(db: Session, plan: QueryPlan, *, tenant_id: str, today: date | None = None) -> list[str]:
+    """根据查询计划从数据库中选择候选员工 ID。"""
     return list(db.scalars(build_candidate_statement(plan, tenant_id=tenant_id, today=today)).all())
 
 
@@ -156,7 +176,7 @@ def execute_composite_search(
     candidate_ids: list[str],
     search_requirement: Any,
 ) -> dict[str, Any]:
-    """Run semantic requirements only inside the SQL-selected candidate set."""
+    """执行复合查询，仅在 SQL 选择的候选员工 ID 中运行语义要求。"""
     if not plan.executable:
         raise ValueError("查询计划仍有待澄清条件")
     if not candidate_ids:
@@ -183,12 +203,14 @@ def execute_composite_search(
 
 
 class QueryOptimizationPlan(BaseModel):
+    """查询优化计划模型。"""
     strategy: Literal["rewrite", "multi_query", "decompose"]
     queries: list[str] = Field(min_length=1, max_length=3, description="最多 3 条检索查询，不能改变原始约束")
     reason: str
 
 
 def choose_optimization_strategy(*, hit_count: int, requirement_count: int, expression_is_vague: bool = False) -> str | None:
+    """根据查询结果和语义要求选择查询优化策略。"""
     if hit_count > 0:
         return None
     if requirement_count > 1:
@@ -199,6 +221,7 @@ def choose_optimization_strategy(*, hit_count: int, requirement_count: int, expr
 
 
 def optimize_semantic_query(requirement: SemanticRequirement, *, strategy: str, model: Any) -> QueryOptimizationPlan:
+    """根据指定策略优化语义查询。"""
     structured_model = model.with_structured_output(QueryOptimizationPlan, method="function_calling")
     return structured_model.invoke(
         [
@@ -209,7 +232,7 @@ def optimize_semantic_query(requirement: SemanticRequirement, *, strategy: str, 
 
 
 def merge_query_results(result_sets: list[list[Any]]) -> list[Any]:
-    """Keep the first and therefore highest-ranked occurrence of each chunk."""
+    """合并多个查询结果集，保留每个 chunk 的第一个出现。"""
     merged: list[Any] = []
     seen: set[str] = set()
     for result_set in result_sets:
@@ -229,6 +252,7 @@ def search_with_optimization(
     requirement_count: int = 1,
     expression_is_vague: bool = False,
 ) -> dict[str, Any]:
+    """执行查询并根据结果选择优化策略。"""
     first_pass = search_query(requirement.query)
     strategy = choose_optimization_strategy(
         hit_count=len(first_pass),
@@ -256,7 +280,15 @@ QUERY_PLAN_SYSTEM_PROMPT = """你是人才查询计划编译器。只把用户�
 
 
 def compile_query_plan(query: str, model: Any) -> QueryPlan:
+    """编译用户输入为 Query计划。"""
     structured_model = model.with_structured_output(QueryPlan, method="function_calling")
     return structured_model.invoke(
         [("system", QUERY_PLAN_SYSTEM_PROMPT.format(filter_dsl=filter_dsl_catalog())), ("user", query)]
     )
+
+if __name__ == '__main__':
+    # 调试用：测试查询计划编译器的结构化输出能力
+    import model_provider
+    model = model_provider.get_chat_model()
+    plan = compile_query_plan("查询所有年龄大于 30 岁有ai经验的候选人", model)
+    print(plan)

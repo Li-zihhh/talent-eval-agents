@@ -1,3 +1,12 @@
+"""后台 Worker 模块 - 独立的 Redis 队列消费者，处理异步任务。
+
+消费的任务类型：
+    - document.parse: 文档解析任务
+    - pipeline.continue: 流水线后续阶段（分块/索引）
+
+Worker 从 Redis 队列中拉取任务并执行，与 FastAPI 主进程解耦。
+"""
+
 import logging
 from uuid import UUID
 

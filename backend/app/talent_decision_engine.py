@@ -1,3 +1,16 @@
+"""人才决策引擎模块 - 构建并编译完整的人才评估 LangGraph 工作流。
+
+工作流节点序列：
+    1. receive_request: 接收用户需求
+    2. interpret_input -> filter_candidates: 理解需求 + 过滤候选人
+    3. generate_dimensions: 生成评估维度
+    4. prepare_work_items -> run_assessment_branch: 并行检索证据并评估
+    5. score_dimensions: 证据质量门禁与排名
+    6. compose_report: 合成可引用评估报告
+
+使用 LangGraph 的 StateGraph 编排，支持中断/恢复和 SSE 流式输出。
+"""
+
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
@@ -11,6 +24,7 @@ from app.talent_decision_graph import DecisionContext
 
 
 class TalentDecisionEngineInput(TypedDict, total=False):
+    """人才决策引擎的输入 Schema。"""
     messages: Annotated[list[AnyMessage], add_messages]
     request_text: str
 

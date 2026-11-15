@@ -1,3 +1,9 @@
+"""分块服务模块 - 管理文本分块任务的生命周期。
+
+负责创建 ChunkingRun 记录、批量生成 DocumentChunk 并持久化到数据库。
+每个分块包含内容哈希用于去重检测，以及页码等定位信息。
+"""
+
 from __future__ import annotations
 
 import hashlib

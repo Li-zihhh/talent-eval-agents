@@ -717,6 +717,7 @@ function App() {
     return (
       <TalentChatPage
         apiBase={API}
+        tenantId={TENANT_ID}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
         onOpenDashboard={() => setProductSection("dashboard")}

@@ -1,3 +1,11 @@
+"""人才运行历史存储模块 - 持久化人才评估对话和运行记录到 PostgreSQL。
+
+管理三张核心表：
+    TalentConversationRecord: 对话会话记录
+    TalentRunRecord: 单次评估运行记录
+    TalentRunStepRecord: 运行中的每个步骤记录
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -10,6 +18,7 @@ from app.models import TalentConversationRecord, TalentRunRecord, TalentRunStepR
 
 
 def _timestamp(value: str) -> datetime:
+    """将 ISO 格式时间字符串转换为 datetime 对象。"""
     return datetime.fromisoformat(value)
 
 

@@ -34,15 +34,46 @@
   font-size: 12px;
 }
 
-.citationPath {
-  display: block;
-  margin-top: 16px;
-  padding: 9px;
-  border-radius: 7px;
-  background: #f4f6f5;
-  color: #63726b;
-  font-size: 10px;
-  word-break: break-all;
+.citationDetail {
+  margin-top: 14px;
+}
+
+.citationDetail p {
+  margin: 6px 0 0;
+  color: #5b6b63;
+  font-size: 12px;
+}
+
+.citationDetail .citationText {
+  margin: 12px 0 0;
+  padding: 12px;
+  border: 1px solid #e6ece9;
+  border-radius: 9px;
+  background: #f7faf8;
+  color: #2f463c;
+  font-size: 12px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.citationDetail .citationText mark {
+  padding: 1px 2px;
+  border-radius: 3px;
+  background: #ffe58f;
+  color: inherit;
+}
+
+.citationError {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px solid #ebc6c1;
+  border-radius: 8px;
+  background: #fff3f1;
+  color: #9f463c;
+  font-size: 12px;
 }
 
 .timelineStep {

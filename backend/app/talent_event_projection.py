@@ -1,8 +1,14 @@
+"""SSE 事件映射模块 - 将 LangGraph 节点执行步骤映射为前端可展示的 SSE 事件标签。
+
+定义了每个工作流节点对应的阶段分组和中文显示名称，
+用于在 SSE 流中向前端发送结构化的进度事件。
+"""
+
 from __future__ import annotations
 
 from typing import Any
 
-
+# 节点名称 -> (步骤标识, 阶段类型, 中文显示名) 的映射表
 STEP_BY_START_NODE = {
     "receive_request": ("understand_request", "workflow", "理解人才要求"),
     "interpret_input": ("understand_request", "workflow", "理解人才要求"),

@@ -1,3 +1,12 @@
+"""文本分块模块 - 将解析后的长文本切分为适合检索的短文本块。
+
+支持两种分块策略：
+    Recursive: 使用递归字符切分器，按段落/句子/词粒度逐级切分。
+    Markdown: 保持 Markdown 结构（标题、表格、代码块）的语义切分。
+
+每个分块包含位置信息（页码、bbox）和层级索引，支持父子块关联。
+"""
+
 from __future__ import annotations
 
 import re
@@ -9,6 +18,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 class ChunkStrategy(StrEnum):
+    """分块策略枚举。"""
     RECURSIVE = "recursive"
     MARKDOWN = "markdown"
 

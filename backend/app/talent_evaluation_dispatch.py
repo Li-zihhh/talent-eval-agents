@@ -1,3 +1,17 @@
+"""人才评估调度模块 - 构建评估维度的并行证据检索与评估分发 LangGraph 图。
+
+核心流程（evaluation graph）：
+    1. generate_evaluation_dimensions: 为候选人生成结构化评估维度（含评分锚点）
+    2. prepare_work_items: 将 (candidate x dimension) 笛卡尔积拆分为独立任务项
+    3. run_assessment_branch: 使用 Send 将每个任务项分发到并行 worker
+    4. worker: 检索证据包 -> 质量门禁判定 -> 候选人在维度上的得分
+    5. aggregate: 聚合所有并行结果
+
+数据模型：
+    EvaluationDimension: 评估维度定义（含 0/3/5 分锚点描述）
+    BranchEvidenceDraft: 单条评估分支的结果草稿
+"""
+
 from __future__ import annotations
 
 from app.evaluation_case import capture_call, EvaluationModule, extraction_scope
@@ -12,11 +26,12 @@ from typing import Annotated, Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Send
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import TypedDict
 
 from app.evidence_pack import build_evidence_packs
 from app.query_plan import FilterCondition
+from app.structured_output import invoke_structured
 from app.talent_decision_graph import DecisionContext
 from app.talent_tools import TalentToolContext, ToolExecutor
 
@@ -24,11 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 class ScoreAnchor(BaseModel):
+    """评分锚点 - 定义维度在不同分数等级下的表现描述。"""
     score: Literal[0, 3, 5]
     description: str = Field(min_length=1, max_length=300)
 
 
 class EvaluationDimension(BaseModel):
+    """评估维度定义 - 包含维度名称、定义、权重、证据需求、评分锚点、检索提示、源需求ID。"""
     name: str = Field(min_length=1, max_length=80)
     definition: str = Field(min_length=1, max_length=500)
     weight_percent: int = Field(ge=1, le=100)
@@ -37,18 +54,29 @@ class EvaluationDimension(BaseModel):
     retrieval_hints: list[str] = Field(min_length=1, max_length=8)
     source_requirement_ids: list[str] = Field(min_length=1, max_length=8)
 
+    @field_validator("retrieval_hints", mode="before")
+    @classmethod
+    def _trim_retrieval_hints(cls, value: Any) -> Any:
+        """检索提示只是给召回用的提示词，模型多写几条应截断而不是让整轮评估失败。"""
+        if isinstance(value, list) and len(value) > 8:
+            return value[:8]
+        return value
+
 
 class EvaluationDimensionPlan(BaseModel):
+    """评估维度计划 - 包含评估维度列表，每个维度对应一个任务项。"""
     dimensions: list[EvaluationDimension] = Field(min_length=1, max_length=6)
 
 
 class DimensionValidationIssue(BaseModel):
+    """评估维度验证问题 - 记录评估维度定义中发现的问题。"""
     code: str
     message: str
     dimension_numbers: list[int] = Field(default_factory=list)
 
 
 class AssessmentWorkItem(BaseModel):
+    """评估工作项 - 包含任务ID、候选人ID、维度编号、维度定义。"""
     task_id: str
     candidate_id: str
     dimension_number: int = Field(ge=1)
@@ -56,6 +84,7 @@ class AssessmentWorkItem(BaseModel):
 
 
 class EvidenceSourceRef(BaseModel):
+    """证据来源引用 - 包含引用的文档分块ID、引用文本、引用位置、引用标签。"""
     citation_id: str
     chunk_id: str
     quote: str = Field(min_length=1)
@@ -65,6 +94,7 @@ class EvidenceSourceRef(BaseModel):
 
 
 class BranchEvidenceFact(BaseModel):
+    """证据事实 - 包含事件、时间周期、声明、答案、证据来源引用。"""
     event: str
     period: str
     claim: str
@@ -73,12 +103,14 @@ class BranchEvidenceFact(BaseModel):
 
 
 class EvidenceCitationRef(BaseModel):
+    """证据引用 - 包含引用的文档分块ID、引用标签。"""
     citation_id: str
     chunk_id: str
     source_label: str = Field(min_length=1)
 
 
 class RequirementEvidence(BaseModel):
+    """需求证据 - 包含需求ID、查询、状态、原因、提取状态、证据事实。"""
     requirement_id: str
     query: str
     status: Literal["sufficient", "partial", "missing", "conflicting"]
@@ -91,6 +123,7 @@ class RequirementEvidence(BaseModel):
 
 
 class BranchEvidenceDraft(BaseModel):
+    """评估分支结果草稿 - 包含任务ID、候选人ID、维度编号、执行状态、需求证据、工具调用ID、错误码、错误消息。"""
     model_config = ConfigDict(extra="forbid")
 
     task_id: str
@@ -106,6 +139,7 @@ class BranchEvidenceDraft(BaseModel):
 
 
 class TalentEvaluationDispatchState(TypedDict, total=False):
+    """人才评估调度状态 - 包含人才评估请求、查询计划、维度维度、候选ID列表、是否预选择候选、工作项列表、分支结果草稿列表、验证问题列表、所需工作项数量、工作项限制、状态、错误列表。"""
     talent_request: dict[str, Any]
     query_plan: dict[str, Any]
     dimensions: list[dict[str, Any]]
@@ -144,6 +178,7 @@ retrieval_hints 应给出可直接用于候选人证据检索的关键词组合�
 
 
 class BranchExecutionError(RuntimeError):
+    """评估分支执行错误 - 包含错误码和错误消息。"""
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
@@ -155,7 +190,7 @@ def build_branch_evidence_provider(
     load_sources: EvidenceSourceLoader,
     extract: Callable[[dict[str, Any], list[dict[str, Any]]], Any],
 ):
-    """Return authorized chunks together with Candidate Evidence Pack 2.0."""
+    """构建评估分支证据提供器。"""
 
     def evidence_provider(
         *,
@@ -237,6 +272,7 @@ def build_branch_evidence_provider(
 def build_structured_dimension_generator(
     model_provider: ModelProvider,
 ) -> DimensionGenerator:
+    """构建结构化评估维度生成器。"""
     def generate(
         talent_request: dict[str, Any],
         query_plan: dict[str, Any],
@@ -256,14 +292,13 @@ def build_structured_dimension_generator(
             "talent_request": talent_request,
             "query_plan": query_plan,
         }
-        result = model.with_structured_output(
+        result = invoke_structured(
+            model,
             EvaluationDimensionPlan,
-            method="function_calling",
-        ).invoke(
             [
                 ("system", DIMENSION_GENERATOR_PROMPT),
                 ("user", json.dumps(payload, ensure_ascii=False)),
-            ]
+            ],
         )
         logger.info(
             "event=dimension_generation_completed "
@@ -279,11 +314,13 @@ def build_structured_dimension_generator(
 
 
 def _branch_query(dimension: EvaluationDimension, requirement: str) -> str:
+    """根据维度和需求生成评估分支查询。"""
     terms = list(dict.fromkeys([*dimension.retrieval_hints, requirement]))
     return " ".join(terms)[:500]
 
 
 def _citation_refs(raw_citations: list[Any]) -> list[dict[str, str]]:
+    """将原始引用转换为评估分支引用格式。"""
     refs: list[dict[str, str]] = []
     seen: set[str] = set()
     for raw in raw_citations:
@@ -315,6 +352,7 @@ def _missing_requirement(
     requirement: str,
     reason: str,
 ) -> RequirementEvidence:
+    """创建缺失需求证据。"""
     return RequirementEvidence(
         requirement_id=requirement_id,
         query=query,
@@ -326,7 +364,7 @@ def _missing_requirement(
 
 
 def build_evidence_branch_worker(service: Any, executor: ToolExecutor) -> BranchWorker:
-    """Prepare evaluation-ready evidence without an additional ReAct loop."""
+    """构建证据分支工作器，负责评估分支的证据检索与评估。"""
 
     def branch_worker(
         work_item: AssessmentWorkItem,
@@ -353,6 +391,7 @@ def build_evidence_branch_worker(service: Any, executor: ToolExecutor) -> Branch
             index: int,
             requirement: str,
         ) -> tuple[RequirementEvidence, str | None, bool]:
+            """评估单个需求，返回证据结果、调用 ID 和是否降级。"""
             requirement_id = f"{work_item.dimension_number}:{index}"
             query = _branch_query(work_item.dimension, requirement)
             logger.info(
@@ -501,6 +540,7 @@ def build_evidence_branch_worker(service: Any, executor: ToolExecutor) -> Branch
 
 
 def build_query_plan_candidate_provider(service: Any) -> CandidateProvider:
+    """构建查询计划候选提供器。"""
     def candidate_provider(
         query_plan: dict[str, Any],
         context: DecisionContext,
@@ -525,6 +565,7 @@ def build_query_plan_candidate_provider(service: Any) -> CandidateProvider:
 def validate_dimension_plan(
     plan: EvaluationDimensionPlan,
 ) -> list[DimensionValidationIssue]:
+    """验证评估维度计划。"""
     total = sum(item.weight_percent for item in plan.dimensions)
     if total == 100:
         return []
@@ -540,6 +581,7 @@ def _receive_input(
     state: TalentEvaluationDispatchState,
     runtime: Runtime[DecisionContext],
 ) -> dict[str, Any]:
+    """接收评估输入。"""
     logger.info(
         "event=graph_node_started function=_receive_input node=receive_input "
         "tenant_id=%s permission_scope_count=%s has_talent_request=%s "
@@ -570,7 +612,8 @@ def _receive_input(
     }
 
 
-def _generate_dimensions(dimension_generator: DimensionGenerator):
+def _generate_dimensions(dimension_generator: DimensionGenerator) -> DimensionGenerator:
+    """生成评估维度。"""
     def generate_dimensions(state: TalentEvaluationDispatchState, runtime: Runtime[DecisionContext]) -> dict[str, Any]:
         from app.config import get_settings
 
@@ -598,8 +641,9 @@ def _generate_dimensions(dimension_generator: DimensionGenerator):
 
 
 def _validate_dimensions(state: TalentEvaluationDispatchState) -> dict[str, Any]:
+    """验证评估维度计划。"""
     plan = EvaluationDimensionPlan(dimensions=state["dimensions"])
-    issues = validate_dimension_plan(plan)
+    issues = validate_dimension_plan(plan) # 校验维度权重是否为 100%, 是则返回空列表, 否则返回校验结果
     logger.info(
         "event=graph_node_completed function=_validate_dimensions "
         "node=validate_dimensions issue_count=%s weight_total=%s",
@@ -614,6 +658,7 @@ def _validate_dimensions(state: TalentEvaluationDispatchState) -> dict[str, Any]
 def _route_dimension_validation(
     state: TalentEvaluationDispatchState,
 ) -> Literal["retrieve_candidates", "prepare_work_items", "dimension_invalid"]:
+    """根据维度验证结果路由。"""
     if state.get("validation_issues"):
         return "dimension_invalid"
     if state.get("candidates_preselected"):
@@ -621,7 +666,8 @@ def _route_dimension_validation(
     return "retrieve_candidates"
 
 
-def _retrieve_candidates(candidate_provider: CandidateProvider):
+def _retrieve_candidates(candidate_provider: CandidateProvider) -> CandidateProvider:
+    """检索评估候选。"""
     def retrieve_candidates(
         state: TalentEvaluationDispatchState,
         runtime: Runtime[DecisionContext],
@@ -640,7 +686,8 @@ def _retrieve_candidates(candidate_provider: CandidateProvider):
     return retrieve_candidates
 
 
-def _prepare_work_items(max_work_items: int):
+def _prepare_work_items(max_work_items: int) -> int:
+    """准备评估工作项。"""
     def prepare_work_items(state: TalentEvaluationDispatchState) -> dict[str, Any]:
         dimensions = [
             EvaluationDimension.model_validate(item) for item in state["dimensions"]
@@ -691,6 +738,7 @@ def _prepare_work_items(max_work_items: int):
 def build_work_item_sends(
     work_items: list[dict[str, Any]],
 ) -> list[Send]:
+    """构建工作项发送。"""
     logger.info(
         "event=work_items_dispatched function=build_work_item_sends "
         "work_item_count=%s task_ids=%s",
@@ -702,7 +750,8 @@ def build_work_item_sends(
     ]
 
 
-def _dispatch_work_items(state: TalentEvaluationDispatchState):
+def _dispatch_work_items(state: TalentEvaluationDispatchState) -> list[Send]:
+    """分工作项。"""
     if state.get("status") == "capacity_exceeded":
         return "capacity_exceeded"
     if not state.get("work_items"):
@@ -710,11 +759,13 @@ def _dispatch_work_items(state: TalentEvaluationDispatchState):
     return build_work_item_sends(state["work_items"])
 
 
-def _run_assessment_branch(branch_worker: BranchWorker):
+def _run_assessment_branch(branch_worker: BranchWorker) -> BranchWorker:
+    """接收工作项并运行评估分支。"""
     def run_assessment_branch(
         state: dict[str, Any],
         runtime: Runtime[DecisionContext],
     ) -> dict[str, Any]:
+        # 从状态中提取工作项
         work_item = AssessmentWorkItem.model_validate(state["work_item"])
         logger.info(
             "event=graph_branch_started function=run_assessment_branch "
@@ -723,6 +774,7 @@ def _run_assessment_branch(branch_worker: BranchWorker):
             work_item.dimension_number,
         )
         try:
+            # 运行分支工作
             result = branch_worker(work_item, runtime.context)
         except TimeoutError as exc:
             logger.error(
@@ -777,6 +829,7 @@ def _run_assessment_branch(branch_worker: BranchWorker):
 
 
 def _finalize(state: TalentEvaluationDispatchState) -> dict[str, Any]:
+    """完成评估。"""
     has_failures = any(
         item["execution_status"] == "failed"
         for item in state.get("branch_results", [])
@@ -795,6 +848,7 @@ def _finalize(state: TalentEvaluationDispatchState) -> dict[str, Any]:
 
 
 def _dimension_invalid(state: TalentEvaluationDispatchState) -> dict[str, Any]:
+    """维度无效。"""
     return {
         "status": "dimension_invalid",
         "errors": [item["message"] for item in state.get("validation_issues", [])],
@@ -802,10 +856,12 @@ def _dimension_invalid(state: TalentEvaluationDispatchState) -> dict[str, Any]:
 
 
 def _no_candidates(_: TalentEvaluationDispatchState) -> dict[str, Any]:
+    """没有候选人员。"""
     return {"status": "no_candidates", "work_items": [], "branch_results": []}
 
 
 def _capacity_exceeded(state: TalentEvaluationDispatchState) -> dict[str, Any]:
+    """评估任务数超过本次上限。"""
     return {
         "status": "capacity_exceeded",
         "errors": [

@@ -1,4 +1,13 @@
-"""Lesson 9: evidence organization. Model judgments remain reviewable hypotheses."""
+"""证据包模块 - 从检索到的文档分块中提取结构化事实并组织为证据包。
+
+核心流程：
+    1. model_extractor: 使用 LLM 从分块文本中抽取事实（event/period/claim + yes/no 判定）
+    2. build_evidence_packs: 将同一候选人的相关事实按维度聚合为证据包
+    3. 每个事实附带源分块引用 (chunk_id + quote)，支持结果可追溯
+
+数据流：检索结果 -> 事实抽取 -> 证据聚合 -> 传递给评估模块
+"""
+
 from __future__ import annotations
 
 from app.evaluation_case import capture_call, current_extraction_scope, EvaluationModule
@@ -7,6 +16,7 @@ import json
 import logging
 import time
 from typing import Annotated, Literal
+from langchain_core.exceptions import OutputParserException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -15,15 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 class StrictModel(BaseModel):
+    """严格模式基类 - 禁止额外字段，确保 LLM 输出符合预期 Schema。"""
     model_config = ConfigDict(extra='forbid')
 
 
 class FactSource(StrictModel):
-    chunk_id: str
-    quote: str = Field(min_length=1, max_length=2000)
+    """事实的来源引用。"""
+    chunk_id: str      # 源分块 ID
+    quote: str = Field(min_length=1, max_length=2000)  # 原文引用
 
 
 class ExtractedFact(StrictModel):
+    """从文档分块中提取的结构化事实。
+
+    使用 event/period/claim/answer 四元组表示候选人的某个事件。
+    """
     event: str = Field(min_length=1, max_length=200)
     period: str = Field(pattern=r'^(?:unknown|\d{4}|\d{4}-\d{2}/\d{4}-\d{2})$')
     claim: str = Field(min_length=1, max_length=200)
@@ -82,12 +98,16 @@ def model_extractor(
     backoff_seconds: float = 0.5,
     retryable_exceptions: tuple[type[Exception], ...] | None = None,
 ):
+    """LLM从文档分块中抽取结构化事实。"""
     if max_attempts < 1:
         raise ValueError("max_attempts 必须大于等于 1")
     retryable = retryable_exceptions or (
         APIConnectionError,
         APITimeoutError,
         RateLimitError,
+        # 模型偶尔返回无法解析的 JSON 或空结构，重试一次通常能恢复
+        OutputParserException,
+        ValueError,
     )
 
     def extract(requirement, sources):
@@ -131,6 +151,8 @@ def model_extractor(
                         input_payload={**payload, **identity, "attempt": attempt},
                         replay_extra={"source_aliases": source_aliases, "sources": sources},
                         version_snapshot={"prompt": "evidence-extraction-v1", "model": get_settings().chat_model})
+                if raw is None:
+                    raise ValueError("模型未返回结构化结果")
                 break
             except retryable as exc:
                 if attempt >= max_attempts:

@@ -1,3 +1,12 @@
+"""人才评估流式运行管理模块 - 管理 SSE 流式输出的评估运行生命周期。
+
+TalentRunManager:
+    - 创建和管理评估运行实例
+    - 通过 SSE 流向前端推送进度事件
+    - 支持中断 (Interrupt) 和恢复 (Resume)
+    - 持久化运行历史到 PostgreSQL
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -71,7 +80,7 @@ class TalentRun:
 
 
 class TalentRunManager:
-    """Stream the real decision graph and retain events for the active SSE stream."""
+    """人才评估流式运行管理模块 - 管理 SSE 流式输出的评估运行生命周期。"""
 
     def __init__(
         self,
@@ -94,6 +103,7 @@ class TalentRunManager:
         self._conditions: dict[str, asyncio.Condition] = {}
 
     async def startup(self) -> None:
+        """启动评估运行管理模块，初始化数据库连接和 LangGraph。"""
         if self._graph is not None:
             return
         from app.talent_decision_runtime import build_runtime_decision_graph
@@ -105,6 +115,7 @@ class TalentRunManager:
         self._graph = build_runtime_decision_graph(checkpointer=saver)
 
     async def shutdown(self) -> None:
+        """关闭评估运行管理模块，关闭数据库连接和 LangGraph。"""
         if self._checkpoint_runtime is not None:
             await self._checkpoint_runtime.close()
             self._checkpoint_runtime = None
@@ -122,6 +133,7 @@ class TalentRunManager:
         *,
         conversation_id: str | None = None,
     ) -> TalentRun:
+        """创建一个新的评估运行实例。"""
         await self.startup()
         conversation_key = conversation_id or str(uuid4())
         run_ids = self._conversation_runs.setdefault(conversation_key, [])
@@ -157,19 +169,23 @@ class TalentRunManager:
         return run
 
     def get_run(self, run_id: str) -> TalentRun:
+        """根据运行 ID 获取评估运行实例。"""
         try:
             return self._runs[run_id]
         except KeyError as exc:
             raise KeyError("运行不存在") from exc
 
     def events_since(self, run_id: str, cursor: int) -> list[RunEvent]:
+        """获取指定运行自指定游标以来的所有事件。"""
         run = self.get_run(run_id)
         return [event for event in run.events if event.sequence > cursor]
 
     def is_stream_finished(self, run_id: str) -> bool:
+        """判断指定运行是否已完成。"""
         return self.get_run(run_id).status in TERMINAL_STATUSES
 
     async def resume_run(self, run_id: str, value: str) -> TalentRun:
+        """人工介入 恢复指定运行。"""
         run = self.get_run(run_id)
         if run.status != RunStatus.WAITING_INPUT or run.pending_interrupt is None:
             raise ValueError("当前运行不在等待人工输入")
@@ -182,6 +198,7 @@ class TalentRunManager:
         return run
 
     async def cancel_run(self, run_id: str) -> TalentRun:
+        """取消指定运行。"""
         run = self.get_run(run_id)
         if run.status in TERMINAL_STATUSES:
             return run
@@ -199,6 +216,7 @@ class TalentRunManager:
         *,
         timeout: float = 15,
     ) -> None:
+        """等待指定运行发生变更。"""
         run = self.get_run(run_id)
         if len(run.events) > cursor or self.is_stream_finished(run_id):
             return
@@ -210,6 +228,7 @@ class TalentRunManager:
                 return
 
     def _append(self, run: TalentRun, event_type: str, data: dict[str, Any]) -> RunEvent:
+        """添加一个事件到指定运行的事件列表。"""
         sequence = len(run.events) + 1
         event = RunEvent(
             event_id=f"{run.run_id}:{sequence}",
@@ -225,11 +244,13 @@ class TalentRunManager:
         return event
 
     def list_history(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """获取所有评估运行的记录。"""
         if self._record_store is None:
             return []
         return self._record_store.list_runs(limit=limit)
 
     def get_history(self, run_id: str) -> dict[str, Any] | None:
+        """根据运行 ID 获取评估运行记录。"""
         if self._record_store is None:
             return None
         return self._record_store.get_run(run_id)
@@ -240,6 +261,7 @@ class TalentRunManager:
         status: str | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
+        """获取所有评估运行的对话记录。"""
         if self._record_store is None:
             return []
         return self._record_store.list_conversations(status=status, limit=limit)
@@ -262,6 +284,7 @@ class TalentRunManager:
         }
 
     async def _execute(self, run: TalentRun, graph_input: Any) -> None:
+        """执行指定运行的图计算。"""
         try:
             graph = self._graph
             if graph is None:
@@ -324,6 +347,7 @@ class TalentRunManager:
             await self._emit(run, "run.failed", {"message": str(exc)})
 
     async def _handle_task_event(self, run: TalentRun, chunk: Any) -> None:
+        """处理指定运行的任务事件。"""
         if not isinstance(chunk, dict) or "result" in chunk or "error" in chunk:
             return
         node = str(chunk.get("name", ""))
@@ -349,6 +373,7 @@ class TalentRunManager:
         namespace: tuple[str, ...],
         chunk: Any,
     ) -> bool:
+        """处理指定运行的更新事件。"""
         if not isinstance(chunk, dict):
             return False
         for node, update in chunk.items():
@@ -405,6 +430,7 @@ class TalentRunManager:
         return False
 
     def _collect_evidence(self, run: TalentRun, update: dict[str, Any]) -> None:
+        """从指定运行的更新中收集证据项。"""
         raw_items = update.get("evidence_items")
         if not isinstance(raw_items, list):
             return
@@ -426,6 +452,7 @@ class TalentRunManager:
         node: str,
         update: dict[str, Any],
     ) -> None:
+        """根据指定运行的更新投影进度事件。"""
         if node == "prepare_work_items":
             total = update.get("required_work_items")
             if isinstance(total, int):
@@ -469,6 +496,7 @@ class TalentRunManager:
             )
 
     async def _emit_projected(self, run: TalentRun, event: dict[str, Any]) -> None:
+        """根据指定运行的更新投影事件。"""
         event_type = str(event["type"])
         data = dict(event["data"])
         step_id = str(data.get("step_id", ""))
@@ -503,6 +531,7 @@ class TalentRunManager:
         await self._emit(run, event_type, data)
 
     async def _emit_report(self, run: TalentRun, markdown: str) -> None:
+        """根据指定运行的更新投影报告事件。"""
         if run.report_emitted:
             return
         run.report_emitted = True
@@ -514,6 +543,7 @@ class TalentRunManager:
             citations.append(
                 {
                     "ref": str(ref),
+                    "chunk_id": str(item.get("ref_id", "")),
                     "candidate": str(item.get("candidate_id", "")),
                     "document": str(item.get("source_label", "")),
                     "quote": str(item.get("quote", "")),
@@ -535,6 +565,7 @@ class TalentRunManager:
         payload: dict[str, Any],
         value: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """根据人工交互类型和值，生成人工交互事件。"""
         interaction_type = payload.get("type")
         if interaction_type == "job_selection":
             options = {
@@ -561,4 +592,3 @@ class TalentRunManager:
                 {"interaction_type": interaction_type, "interaction_id": interaction_id},
             )
         raise ValueError(f"暂不支持的人工交互类型: {interaction_type}")
-

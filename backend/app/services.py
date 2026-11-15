@@ -1,7 +1,17 @@
+"""核心业务服务模块 - 提供文档上传、解析和员工数据导入等核心业务逻辑。
+
+主要函数：
+    upload_document: 上传文档文件、创建数据库记录、触发异步解析流水线
+    parse_version: 执行文档版本解析（自动选择解析引擎）
+    import_employees: 批量导入员工档案到 EmployeeProfile 表
+    import_jobs: 批量导入岗位描述到 JobDescription 表
+"""
+
 import hashlib
 import json
 import logging
 import mimetypes
+import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +32,31 @@ logger = logging.getLogger(__name__)
 
 
 def upload_document(db: Session, store: ObjectStore, *, filename: str, content: bytes, candidate_id: str, title: str, document_type: str, employee_id: UUID | None = None, knowledge_base_id: UUID | None = None, permission_scope: str = "hr_private", tenant_id: str = "course-demo") -> Document:
+    """上传文档文件并创建完整的数据库记录链。
+
+    执行步骤：
+        1. 计算文件 SHA256 摘要。
+        2. 创建 Document 记录并生成物料编号 (MAT-xxxxxx)。
+        3. 上传文件到对象存储 (MinIO)。
+        4. 创建 FileObject + DocumentVersion 记录。
+        5. 异步触发解析流水线。
+
+    Args:
+        db: 数据库会话。
+        store: 对象存储客户端。
+        filename: 原始文件名。
+        content: 文件二进制内容。
+        candidate_id: 关联的候选人 ID（员工编号）。
+        title: 文档标题。
+        document_type: 文档类型（如 resume、certificate）。
+        employee_id: 关联的员工 UUID（可选）。
+        knowledge_base_id: 关联的知识库 UUID（可选）。
+        permission_scope: 权限范围。
+        tenant_id: 租户 ID。
+
+    Returns:
+        创建的 Document 对象。
+    """
     logger.info(
         "document_upload_started filename=%s size_bytes=%s employee_id=%s knowledge_base_id=%s document_type=%s",
         filename,
@@ -58,6 +93,20 @@ def upload_document(db: Session, store: ObjectStore, *, filename: str, content: 
 
 
 def parse_version(db: Session, store: ObjectStore, version_id: UUID, job_id: UUID | None = None) -> ParseJob:
+    """执行文档版本的解析任务。
+
+    根据文件类型自动选择解析引擎（PDF->MinerU, XLSX->Native 等），
+    将解析结果保存为 ParseArtifact，并更新 ParseJob 状态。
+
+    Args:
+        db: 数据库会话。
+        store: 对象存储客户端（用于下载文件）。
+        version_id: 要解析的文档版本 ID。
+        job_id: 已有的解析任务 ID（可选，用于重试）。
+
+    Returns:
+        解析任务对象 ParseJob。
+    """
     version = db.get(DocumentVersion, version_id)
     if not version:
         raise ValueError("文档版本不存在")
@@ -82,14 +131,18 @@ def parse_version(db: Session, store: ObjectStore, version_id: UUID, job_id: UUI
     try:
         content = store.get_bytes(file_object.object_key)
         suffix = Path(file_object.original_name).suffix
-        with tempfile.NamedTemporaryFile(suffix=suffix) as temp:
-            temp.write(content)
-            temp.flush()
+        # Windows 下 NamedTemporaryFile 保持打开的句柄，解析器无法再次打开同名文件，
+        # 因此先写入一个已关闭的临时文件，解析结束后再显式删除。
+        handle, temp_name = tempfile.mkstemp(suffix=suffix)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(handle, "wb") as temp:
+                temp.write(content)
             if parser_kind == ParserKind.MINERU:
-                result = parse_with_mineru(Path(temp.name))
+                result = parse_with_mineru(temp_path)
             else:
                 try:
-                    result = parse_document(Path(temp.name))
+                    result = parse_document(temp_path)
                 except Exception as exc:
                     if suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"}:
                         raise
@@ -99,7 +152,9 @@ def parse_version(db: Session, store: ObjectStore, version_id: UUID, job_id: UUI
                         file_object.original_name,
                         exc,
                     )
-                    result = parse_with_mineru(Path(temp.name))
+                    result = parse_with_mineru(temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         markdown = result.text.encode("utf-8")
         structured = json.dumps(result.structured or result.metadata, ensure_ascii=False, indent=2).encode("utf-8")
         base = f"artifacts/{job.id}"

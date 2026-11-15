@@ -1,3 +1,13 @@
+"""FastAPI 应用入口 - 配置 CORS、挂载路由、初始化服务生命周期。
+
+启动时执行：
+    1. 配置日志系统（按日切分）。
+    2. 初始化 Redis 连接池。
+    3. 初始化 Milvus Collection。
+    4. 初始化 LangGraph Checkpoint 表。
+    5. 挂载人才运行历史存储。
+"""
+
 import logging
 from contextlib import asynccontextmanager
 from time import perf_counter

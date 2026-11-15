@@ -56,6 +56,8 @@ const EVENT_TYPES = [
 
 type Props = {
   apiBase: string;
+  tenantId: string;
+  permissionScopes?: string;
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
   onOpenDashboard: () => void;
@@ -114,6 +116,131 @@ export function MarkdownReport({ text, onCitation }: { text: string; onCitation:
   );
 }
 
+type CitationDetail = {
+  citation_id: string;
+  content: string;
+  document_title: string;
+  version_no: number;
+  version_state: "current" | "historical";
+  heading_path: string[];
+  page_start: number | null;
+  timestamp_start: number | null;
+  markdown_start: number | null;
+  markdown_end: number | null;
+  quote_start: number | null;
+  quote_end: number | null;
+};
+
+function citationChunkId(citation: Citation): string {
+  if (citation.chunk_id) return citation.chunk_id;
+  // 旧事件没有 chunk_id 时从 citation_url 兜底解析
+  return citation.url ? (citation.url.split("?")[0].split("/").pop() ?? "") : "";
+}
+
+function citationQuoteRange(citation: Citation): { start: number | null; end: number | null } {
+  const query = citation.url?.split("?")[1];
+  if (!query) return { start: null, end: null };
+  const params = new URLSearchParams(query);
+  const start = Number(params.get("quote_start"));
+  const end = Number(params.get("quote_end"));
+  return {
+    start: Number.isFinite(start) ? start : null,
+    end: Number.isFinite(end) ? end : null,
+  };
+}
+
+function highlightedContent(detail: CitationDetail) {
+  const characters = Array.from(detail.content);
+  if (detail.quote_start == null || detail.quote_end == null) return detail.content;
+  return (
+    <>
+      {characters.slice(0, detail.quote_start).join("")}
+      <mark>{characters.slice(detail.quote_start, detail.quote_end).join("")}</mark>
+      {characters.slice(detail.quote_end).join("")}
+    </>
+  );
+}
+
+function CitationDrawer({
+  citation,
+  apiBase,
+  tenantId,
+  permissionScopes,
+  onClose,
+}: {
+  citation: Citation;
+  apiBase: string;
+  tenantId: string;
+  permissionScopes: string;
+  onClose: () => void;
+}) {
+  const [detail, setDetail] = useState<CitationDetail | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const chunkId = citationChunkId(citation);
+  const { start, end } = citationQuoteRange(citation);
+
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      if (!chunkId) {
+        setError("引用缺少分块编号，无法回查原文");
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setError("");
+      setDetail(null);
+      const quoteQuery = start != null && end != null ? `?quote_start=${start}&quote_end=${end}` : "";
+      try {
+        const data = await requestJson(
+          `${apiBase}/evidence/citations/${encodeURIComponent(chunkId)}${quoteQuery}`,
+          { headers: { "X-Tenant-Id": tenantId, "X-Permission-Scopes": permissionScopes } },
+        );
+        if (active) setDetail(data as CitationDetail);
+      } catch (e) {
+        if (active) setError(e instanceof Error ? e.message : "引用不可用");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      active = false;
+    };
+  }, [apiBase, chunkId, tenantId, permissionScopes, start, end]);
+
+  return (
+    <div className="citationOverlay" onClick={onClose}>
+      <aside className="citationDrawer" onClick={(event) => event.stopPropagation()}>
+        <button className="close" onClick={onClose}><X /></button>
+        <small>{citation.ref} · 证据原文</small>
+        <h2>{citation.candidate}</h2>
+        <p>{detail?.document_title || citation.document}</p>
+        <blockquote>{citation.quote}</blockquote>
+        {loading && <p role="status">正在核查引用权限…</p>}
+        {error && <p role="alert" className="citationError">{error}</p>}
+        {detail && (
+          <div className="citationDetail">
+            <div className="citationMeta">
+              <span>{detail.version_state === "historical" ? "历史文档版本" : "当前文档版本"}</span>
+              <span>v{detail.version_no}</span>
+            </div>
+            <p>标题路径：{detail.heading_path?.length ? detail.heading_path.join(" / ") : "无"}</p>
+            {detail.markdown_start != null && detail.markdown_end != null && (
+              <p>Chunk 位置：[{detail.markdown_start}, {detail.markdown_end})</p>
+            )}
+            {detail.quote_start != null && detail.quote_end != null && (
+              <p>Quote 位置：[{detail.quote_start}, {detail.quote_end})</p>
+            )}
+            <pre className="citationText">{highlightedContent(detail)}</pre>
+          </div>
+        )}
+      </aside>
+    </div>
+  );
+}
+
 function StepStatusIcon({ step }: { step: RunStep }) {
   if (step.status === "completed") return <Check />;
   if (step.status === "running") return <LoaderCircle className="spin" />;
@@ -128,7 +255,7 @@ function stepStatusLabel(step: RunStep): string {
   return step.total ? `${step.completed || 0}/${step.total}` : "执行中";
 }
 
-export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onOpenDashboard, onOpenRecords, onOpenEvaluation }: Props) {
+export function TalentChatPage({ apiBase, tenantId, permissionScopes = "hr_private", sidebarCollapsed, onToggleSidebar, onOpenDashboard, onOpenRecords, onOpenEvaluation }: Props) {
   const [message, setMessage] = useState("我们正在为上海研发团队招聘一名高级 AI 应用工程师，要求至少 5 年后端或 AI 应用开发经验，并做过企业知识库和 Agent 评测项目。请基于现有简历给出候选人证据、风险和推荐结论");
   const [view, setView] = useState<RunView>(initialRunView);
   const [revision, setRevision] = useState("");
@@ -344,7 +471,7 @@ export function TalentChatPage({ apiBase, sidebarCollapsed, onToggleSidebar, onO
         </section>
       </main>
 
-      {activeCitation && <div className="citationOverlay" onClick={() => setActiveCitation(null)}><aside className="citationDrawer" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setActiveCitation(null)}><X /></button><small>{activeCitation.ref} · 证据原文</small><h2>{activeCitation.candidate}</h2><p>{activeCitation.document}</p><blockquote>{activeCitation.quote}</blockquote><div className="citationMeta"><span>权限已校验</span><span>当前文档版本</span></div>{activeCitation.url && <code className="citationPath">{activeCitation.url}</code>}</aside></div>}
+      {activeCitation && <CitationDrawer citation={activeCitation} apiBase={apiBase} tenantId={tenantId} permissionScopes={permissionScopes} onClose={() => setActiveCitation(null)} />}
       {activeStep && <div className="stepOutputOverlay" onClick={() => setActiveStep(null)}><aside className="stepOutputDrawer" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setActiveStep(null)}><X /></button><small><Braces />节点输出</small><h2>{activeStep.title}</h2><StepCaseFeedback apiBase={apiBase} runId={activeStepRun} stepId={activeStep.stepId} /><div className="stepOutputMeta"><span>{stepStatusLabel(activeStep)}</span><span>{formatDuration(activeStep.durationMs)}</span></div>{activeStep.output ? <pre>{JSON.stringify(activeStep.output, null, 2)}</pre> : <p className="emptyStepOutput">节点完成后显示受控的业务输出</p>}</aside></div>}
     </div>
   );

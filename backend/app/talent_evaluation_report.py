@@ -1,3 +1,15 @@
+"""人才评估报告模块 - 构建报告生成 LangGraph 图，合成可引用证据的评估报告。
+
+核心流程（report graph）：
+    1. score_dimensions: 对每个维度的证据质量进行门禁判定（sufficient/partial/missing/conflicting/failed）
+    2. consistency_review: 一致性审查 - 验证候选人各维度结论是否矛盾
+    3. compose_final_report: 合成最终评估报告（含候选人排序、维度得分、证据引用）
+
+关键数据模型：
+    ScoredDimension: 维度评分结果（分数 + 置信度 + 证据状态 + 引用列表）
+    TalentEvaluationReport: 完整的结构化评估报告
+"""
+
 from __future__ import annotations
 
 import json
@@ -29,6 +41,7 @@ ConfidenceLevel = Literal["high", "medium", "low", "unavailable"]
 
 
 class DimensionAssessment(BaseModel):
+    """维度评估结果模型"""
     task_id: str
     candidate_id: str
     dimension_number: int = Field(ge=1)
@@ -42,9 +55,10 @@ class DimensionAssessment(BaseModel):
 
 
 class DimensionJudgement(BaseModel):
+    """维度判断结果模型"""
     evidence_status: Literal["sufficient", "partial", "missing", "conflicting"] = Field(
         description=(
-            "当前维度的证据状态：sufficient 表示证据充分，partial 表示可评分但仍有缺失，"
+            "当前维度的证据状态：sufficient 表示证据充分，partial 表示有部分可评分事实但仍有缺失，"
             "missing 表示无法评分，conflicting 表示关键事实互斥"
         )
     )
@@ -52,7 +66,10 @@ class DimensionJudgement(BaseModel):
         default=None,
         ge=0,
         le=5,
-        description="依据当前维度评分锚点给出的 0 到 5 分；missing 和 conflicting 必须为 null",
+        description=(
+            "依据当前维度评分锚点给出的 0 到 5 分；sufficient 必须给出分数，"
+            "partial 在证据不足以对照锚点时可以留空，missing 和 conflicting 必须为 null"
+        ),
     )
     confidence: ConfidenceLevel = Field(
         description="本次维度判断的置信等级，取 high、medium、low 或 unavailable"
@@ -77,6 +94,7 @@ class DimensionJudgement(BaseModel):
 
 
 class ConsistencyIssue(BaseModel):
+    """跨维度逻辑问题模型"""
     candidate_id: str = Field(description="存在跨维度逻辑冲突的候选人编号")
     dimension_numbers: list[int] = Field(
         min_length=2,
@@ -96,6 +114,7 @@ class ConsistencyIssue(BaseModel):
 
 
 class ConsistencyReview(BaseModel):
+    """一致性维度审查模型"""
     issues: list[ConsistencyIssue] = Field(
         default_factory=list,
         max_length=20,
@@ -104,6 +123,7 @@ class ConsistencyReview(BaseModel):
 
 
 class CandidateAssessment(BaseModel):
+    """候选人评估模型"""
     candidate_id: str
     confirmed_score: float = Field(ge=0, le=100)
     possible_score: float = Field(ge=0, le=100)
@@ -114,6 +134,7 @@ class CandidateAssessment(BaseModel):
 
 
 class EvidenceItem(BaseModel):
+    """证据项模型"""
     ref_id: str = Field(min_length=1, description="内部保存的完整 Chunk 编号")
     model_ref: str | None = Field(
         default=None,
@@ -127,6 +148,7 @@ class EvidenceItem(BaseModel):
 
 
 class ReportPoint(BaseModel):
+    """报告点"""
     text: str = Field(
         min_length=1,
         max_length=500,
@@ -140,6 +162,7 @@ class ReportPoint(BaseModel):
 
 
 class CandidateReportDraft(BaseModel):
+    """候选人报告草稿模型"""
     candidate_id: str = Field(description="候选人编号，顺序必须与输入排名一致")
     summary: str = Field(
         min_length=1,
@@ -176,6 +199,7 @@ class ReportDraft(BaseModel):
 
 
 class TalentEvaluationReportState(TypedDict, total=False):
+    """人才评估报告状态模型"""
     dimensions: list[dict[str, Any]]
     branch_results: list[dict[str, Any]]
     evidence_items: list[dict[str, Any]]
@@ -202,6 +226,7 @@ ModelProvider = Callable[[], Any]
 
 
 def branch_evidence_refs(branch: BranchEvidenceDraft) -> list[str]:
+    """从评估分支结果草稿中提取证据证据编号"""
     return list(
         dict.fromkeys(
             source.chunk_id
@@ -213,6 +238,7 @@ def branch_evidence_refs(branch: BranchEvidenceDraft) -> list[str]:
 
 
 def branch_missing_information(branch: BranchEvidenceDraft) -> list[str]:
+    """从评估分支结果草稿中提取缺失信息"""
     missing: list[str] = []
     for requirement in branch.requirements:
         missing.extend(requirement.missing_information)
@@ -224,6 +250,7 @@ def branch_missing_information(branch: BranchEvidenceDraft) -> list[str]:
 def evidence_items_from_branches(
     branches: list[BranchEvidenceDraft],
 ) -> list[EvidenceItem]:
+    """从评估分支结果草稿中提取证据项"""
     items: dict[str, EvidenceItem] = {}
     for branch in branches:
         for requirement in branch.requirements:
@@ -248,6 +275,7 @@ def evidence_items_from_branches(
 def _evidence_reference_maps(
     evidence_items: list[EvidenceItem],
 ) -> tuple[dict[str, str], dict[str, str]]:
+    """从证据项中提取证据编号映射"""
     chunk_to_model: dict[str, str] = {}
     model_to_chunk: dict[str, str] = {}
     for index, item in enumerate(evidence_items, start=1):
@@ -264,6 +292,7 @@ def _restore_evidence_refs(
     evidence_refs: list[str],
     model_to_chunk: dict[str, str],
 ) -> list[str]:
+    """从模型返回的证据编号中恢复原始证据编号"""
     unknown = [ref_id for ref_id in evidence_refs if ref_id not in model_to_chunk]
     if unknown:
         raise ValueError(f"模型返回了未知证据编号: {', '.join(unknown)}")
@@ -273,6 +302,7 @@ def _restore_evidence_refs(
 def _model_evidence_payload(
     evidence_items: list[EvidenceItem],
 ) -> tuple[list[dict[str, str]], dict[str, str], dict[str, str]]:
+    """将证据项转换为模型输入格式"""
     chunk_to_model, model_to_chunk = _evidence_reference_maps(evidence_items)
     payload = [
         {
@@ -290,6 +320,7 @@ def _branch_model_payload(
     branch: BranchEvidenceDraft,
     chunk_to_model: dict[str, str],
 ) -> dict[str, Any]:
+    """将评估分支结果草稿转换为模型输入格式"""
     return {
         "task_id": branch.task_id,
         "candidate_id": branch.candidate_id,
@@ -324,7 +355,8 @@ def _branch_model_payload(
 
 DIMENSION_SCORER_PROMPT = """你负责依据单个评估维度的定义、证据要求和 0/3/5 分锚点完成评分。
 输入中的证据使用 E1、E2 这类短编号。evidence_refs 只能逐字复制这些短编号，不得缩写、改写或生成编号。
-有完整可评分证据时使用 sufficient，存在可评分事实但仍有缺失时使用 partial。
+有完整可评分证据时使用 sufficient，sufficient 必须给出 0 到 5 分。
+存在部分可评分事实但仍有缺失时使用 partial；partial 应尽量给出分数，若现有事实不足以对照锚点，可以留空并在 missing_items 说明缺失。
 材料无法支持评分时使用 missing，同一事实范围存在互斥说法时使用 conflicting。
 missing 和 conflicting 的 score 必须为 null，材料缺失不能解释为 0 分。
 score 必须对照输入维度的评分锚点，rationale 需要说明证据事实与锚点的对应关系。
@@ -335,6 +367,7 @@ missing_items 只记录影响当前判断的缺失信息，conflicts 只记录�
 def build_structured_dimension_scorer(
     model_provider: ModelProvider,
 ) -> DimensionScorer:
+    """构建结构化维度评分器"""
     def score(
         dimension: EvaluationDimension,
         branch: BranchEvidenceDraft,
@@ -384,6 +417,7 @@ risks 只整理输入中已有的缺失、冲突、执行失败和置信度风�
 def build_structured_report_writer(
     model_provider: ModelProvider,
 ) -> ReportWriter:
+    """构建结构化报告编写器"""
     def write(
         candidates: list[CandidateAssessment],
         evidence_items: list[EvidenceItem],
@@ -467,6 +501,7 @@ dimension_numbers 记录发生冲突的维度序号，message 说明互相矛盾
 def build_structured_consistency_reviewer(
     model_provider: ModelProvider,
 ) -> ConsistencyReviewer:
+    """构建结构化一致性检查器"""
     def review(
         assessments: list[DimensionAssessment],
         evidence_items: list[EvidenceItem],
@@ -519,6 +554,7 @@ def validate_dimension_judgement(
     branch: BranchEvidenceDraft,
     judgement: DimensionJudgement,
 ) -> None:
+    """验证维度判断结果是否符合要求"""
     unavailable_refs = sorted(
         set(judgement.evidence_refs) - set(branch_evidence_refs(branch))
     )
@@ -526,8 +562,10 @@ def validate_dimension_judgement(
         raise ValueError(f"评分结果引用了未提供的证据: {', '.join(unavailable_refs)}")
     if judgement.evidence_status in {"missing", "conflicting"} and judgement.score is not None:
         raise ValueError(f"{judgement.evidence_status} 状态不允许设置分数")
-    if judgement.evidence_status in {"sufficient", "partial"} and judgement.score is None:
-        raise ValueError(f"{judgement.evidence_status} 状态必须设置分数")
+    # sufficient 表示证据完整，不给分自相矛盾；partial 允许留空，按未评分维度计入覆盖率缺口，
+    # 避免为了通过校验而硬凑一个没有锚点支撑的分数。
+    if judgement.evidence_status == "sufficient" and judgement.score is None:
+        raise ValueError("sufficient 状态必须设置分数")
     if judgement.evidence_status in {"sufficient", "partial", "conflicting"} and not judgement.evidence_refs:
         raise ValueError(f"{judgement.evidence_status} 状态必须保留证据引用")
     if judgement.evidence_status == "missing" and not judgement.missing_items:
@@ -541,6 +579,7 @@ def aggregate_candidate_assessments(
     assessments: list[DimensionAssessment],
     consistency_issues: list[ConsistencyIssue] | None = None,
 ) -> list[CandidateAssessment]:
+    """将维度评估结果聚合为候选人评估结果"""
     issues_by_candidate: dict[str, list[ConsistencyIssue]] = {}
     for issue in consistency_issues or []:
         issues_by_candidate.setdefault(issue.candidate_id, []).append(issue)
@@ -593,6 +632,7 @@ def aggregate_candidate_assessments(
 def rank_candidate_assessments(
     candidates: list[CandidateAssessment],
 ) -> list[CandidateAssessment]:
+    """对候选人评估结果进行排名"""
     return sorted(
         candidates,
         key=lambda item: (
@@ -604,6 +644,7 @@ def rank_candidate_assessments(
 
 
 def _receive_input(state: TalentEvaluationReportState) -> dict[str, Any]:
+    """接收输入数据"""
     dimensions = [EvaluationDimension.model_validate(item) for item in state.get("dimensions", [])]
     branches = [BranchEvidenceDraft.model_validate(item) for item in state.get("branch_results", [])]
     evidence_items = evidence_items_from_branches(branches)
@@ -685,10 +726,12 @@ def _score_dimensions(
     *,
     max_concurrency: int = 12,
 ):
+    """对评估维度进行评分"""
     if max_concurrency < 1:
         raise ValueError("max_concurrency 必须大于 0")
 
     def score_dimensions(state: TalentEvaluationReportState) -> dict[str, Any]:
+        """对每个评估维度进行评分"""
         dimensions = {
             dimension_number: EvaluationDimension.model_validate(raw)
             for dimension_number, raw in enumerate(state["dimensions"], start=1)
@@ -712,6 +755,7 @@ def _score_dimensions(
         )
 
         def score_branch(branch: BranchEvidenceDraft) -> DimensionAssessment:
+            """对评估分支结果草稿进行评分"""
             if branch.execution_status == "failed":
                 return DimensionAssessment(
                     task_id=branch.task_id,
@@ -748,7 +792,31 @@ def _score_dimensions(
                 branch,
                 branch_evidence,
             )
-            validate_dimension_judgement(branch, judgement)
+            try:
+                validate_dimension_judgement(branch, judgement)
+            except ValueError as exc:
+                # 单个维度的判断违反评分契约时只降级该维度，不能带崩整轮评估。
+                _log_node(
+                    "score_dimensions",
+                    "invalid_judgement",
+                    {
+                        "task_id": branch.task_id,
+                        "error": str(exc),
+                        "judgement": judgement.model_dump(mode="json"),
+                    },
+                )
+                return DimensionAssessment(
+                    task_id=branch.task_id,
+                    candidate_id=branch.candidate_id,
+                    dimension_number=branch.dimension_number,
+                    evidence_status="failed",
+                    score=None,
+                    confidence="unavailable",
+                    evidence_refs=judgement.evidence_refs,
+                    missing_items=[str(exc)],
+                    conflicts=[],
+                    rationale=str(exc)[:1000],
+                )
             _log_node(
                 "score_dimensions",
                 "scoring",
@@ -810,6 +878,7 @@ def validate_consistency_review(
     assessments: list[DimensionAssessment],
     evidence_items: list[EvidenceItem],
 ) -> None:
+    """验证一致性检查结果是否符合要求"""
     dimensions_by_candidate = {
         candidate_id: {
             item.dimension_number
@@ -848,6 +917,7 @@ def _review_consistency(
     *,
     max_concurrency: int = 12,
 ):
+    """执行一致性检查"""
     if max_concurrency < 1:
         raise ValueError("max_concurrency 必须大于 0")
 
@@ -930,6 +1000,7 @@ def _review_consistency(
 
 
 def _aggregate_candidates(state: TalentEvaluationReportState) -> dict[str, Any]:
+    """将维度评估结果聚合为候选人评估结果"""
     dimensions = [EvaluationDimension.model_validate(item) for item in state["dimensions"]]
     assessments = [
         DimensionAssessment.model_validate(item) for item in state["dimension_assessments"]
@@ -979,7 +1050,9 @@ def _aggregate_candidates(state: TalentEvaluationReportState) -> dict[str, Any]:
 
 
 def _compose_report(report_writer: ReportWriter):
+    """根据候选人评估结果和证据包合成评估报告"""
     def compose_report(state: TalentEvaluationReportState) -> dict[str, Any]:
+        """根据候选人评估结果和证据包合成评估报告"""
         candidates = [
             CandidateAssessment.model_validate(item)
             for item in state["candidate_assessments"]
@@ -1018,6 +1091,7 @@ def validate_report_draft(
     candidates: list[CandidateAssessment],
     evidence_items: list[EvidenceItem],
 ) -> None:
+    """验证评估报告草稿是否符合要求"""
     expected_candidates = [item.candidate_id for item in candidates]
     actual_candidates = [item.candidate_id for item in draft.candidates]
     if actual_candidates != expected_candidates:
@@ -1046,6 +1120,7 @@ def render_report_markdown(
     candidates: list[CandidateAssessment],
     evidence_items: list[EvidenceItem],
 ) -> str:
+    """将评估报告草稿渲染为Markdown格式"""
     validate_report_draft(draft, candidates, evidence_items)
     evidence_by_id = {item.ref_id: item for item in evidence_items}
     candidate_by_id = {item.candidate_id: item for item in candidates}
@@ -1084,6 +1159,7 @@ def render_report_markdown(
 
 
 def _validate_and_render_report(state: TalentEvaluationReportState) -> dict[str, Any]:
+    """验证并渲染评估报告"""
     draft = ReportDraft.model_validate(state["report_draft"])
     candidates = [
         CandidateAssessment.model_validate(item) for item in state["candidate_assessments"]
@@ -1116,12 +1192,13 @@ def _validate_and_render_report(state: TalentEvaluationReportState) -> dict[str,
 
 def build_talent_evaluation_report_graph(
     *,
-    dimension_scorer: DimensionScorer,
-    consistency_reviewer: ConsistencyReviewer | None = None,
-    report_writer: ReportWriter,
-    max_scoring_concurrency: int = 12,
-    max_consistency_concurrency: int = 12,
+    dimension_scorer: DimensionScorer, # 评估维度评分器
+    consistency_reviewer: ConsistencyReviewer | None = None, # 一致性检查器
+    report_writer: ReportWriter, # 评估报告写入器
+    max_scoring_concurrency: int = 12, # 最大并行维度评估数
+    max_consistency_concurrency: int = 12, # 最大并行一致性检查数
 ):
+    """构建人才评估报告图，包含维度评估、一致性检查、候选人评估、报告合成等子图。"""
     reviewer = consistency_reviewer or (
         lambda assessments, evidence_items: ConsistencyReview()
     )
