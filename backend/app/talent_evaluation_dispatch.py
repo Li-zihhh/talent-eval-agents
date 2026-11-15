@@ -25,13 +25,13 @@ from typing import Annotated, Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import TypedDict
 
 from app.evidence_pack import build_evidence_packs
 from app.query_plan import FilterCondition
-from app.structured_output import invoke_structured
+from app.structured_output import StructuredOutputError, invoke_structured
 from app.talent_decision_graph import DecisionContext
 from app.talent_tools import TalentToolContext, ToolExecutor
 
@@ -152,6 +152,9 @@ class TalentEvaluationDispatchState(TypedDict, total=False):
     work_item_limit: int
     status: str
     errors: list[str]
+    dimension_revision: str
+    dimension_revision_round: int
+    request_text: str
 
 
 DimensionGenerator = Callable[
@@ -173,7 +176,8 @@ hard_conditions 已用于候选人过滤，不得再生成评分维度。
 同一主题的多条要求合并为一个维度，并在 retrieval_hints 中提供多个检索词组合。
 每个 semantic_condition 或 evaluation_preference 只生成一个维度，不得把同一条要求拆成多个维度。
 权重使用整数百分比且合计为 100。评分锚点固定为 0、3、5 分。
-retrieval_hints 应给出可直接用于候选人证据检索的关键词组合。
+retrieval_hints 应给出可直接用于候选人证据检索的关键词组合，最多 8 条。
+如果 talent_request 中带有 dimension_revision，说明用户对上一版维度不满意或需要补充，请按该修订内容重新生成维度。
 """.strip()
 
 
@@ -617,16 +621,35 @@ def _generate_dimensions(dimension_generator: DimensionGenerator) -> DimensionGe
     def generate_dimensions(state: TalentEvaluationDispatchState, runtime: Runtime[DecisionContext]) -> dict[str, Any]:
         from app.config import get_settings
 
+        talent_request = state["talent_request"]
+        if state.get("dimension_revision"):
+            # 用户修订的维度要求随请求一起送给模型，让它按修订意见重新生成
+            talent_request = {**talent_request, "dimension_revision": state["dimension_revision"]}
+
         # 维度生成 Case 必须在确定性校验前采集模型的原始结构化输出。
         # talent_request 与 query_plan 组成可重放输入，输出保留完整维度、
         # 权重、证据要求、评分锚点、检索提示和来源需求编号。
         # 校验结果继续由下游 validate_dimensions 生成，不混入当前 Case。
-        plan = capture_call(
-            lambda: dimension_generator(state["talent_request"], state["query_plan"]),
-            context=runtime.context, module_key=EvaluationModule.DIMENSION_GENERATION,
-            input_payload={"talent_request": state["talent_request"], "query_plan": state["query_plan"]},
-            version_snapshot={"prompt": "dimension-generator-v1", "model": get_settings().chat_model},
-        )
+        try:
+            plan = capture_call(
+                lambda: dimension_generator(talent_request, state["query_plan"]),
+                context=runtime.context, module_key=EvaluationModule.DIMENSION_GENERATION,
+                input_payload={"talent_request": talent_request, "query_plan": state["query_plan"]},
+                version_snapshot={"prompt": "dimension-generator-v1", "model": get_settings().chat_model},
+            )
+        except StructuredOutputError as exc:
+            # 结构化输出重试后仍不可用：转成可修订的维度问题，交给人工补充要求
+            logger.warning(
+                "event=dimension_generation_unavailable function=generate_dimensions reason=%s",
+                exc.reason,
+            )
+            return {
+                "dimensions": [],
+                "status": "dimensions_unavailable",
+                "validation_issues": [
+                    DimensionValidationIssue(code="dimension_unavailable", message=str(exc)).model_dump(mode="json")
+                ],
+            }
         logger.info(
             "event=graph_node_completed function=generate_dimensions "
             "node=generate_dimensions dimension_count=%s dimension_names=%s",
@@ -642,6 +665,17 @@ def _generate_dimensions(dimension_generator: DimensionGenerator) -> DimensionGe
 
 def _validate_dimensions(state: TalentEvaluationDispatchState) -> dict[str, Any]:
     """验证评估维度计划。"""
+    if not state.get("dimensions"):
+        # 模型没有产出维度：保留上游给出的可修订问题，交给人工补充要求
+        issues = state.get("validation_issues") or [
+            DimensionValidationIssue(code="no_dimensions", message="模型没有生成任何评估维度").model_dump(mode="json")
+        ]
+        logger.info(
+            "event=graph_node_completed function=_validate_dimensions "
+            "node=validate_dimensions issue_count=%s weight_total=%s",
+            len(issues), 0,
+        )
+        return {"validation_issues": issues, "status": "dimension_invalid"}
     plan = EvaluationDimensionPlan(dimensions=state["dimensions"])
     issues = validate_dimension_plan(plan) # 校验维度权重是否为 100%, 是则返回空列表, 否则返回校验结果
     logger.info(
@@ -655,11 +689,94 @@ def _validate_dimensions(state: TalentEvaluationDispatchState) -> dict[str, Any]
     }
 
 
+DIMENSION_REVISION_LIMIT = 2
+
+
+def _revision_request_text(state: TalentEvaluationDispatchState) -> str:
+    """中断载荷里展示给用户的可编辑需求文本。"""
+    text = str(state.get("request_text") or "").strip()
+    if text:
+        return text
+    talent_request = state.get("talent_request") or {}
+    parts = []
+    if talent_request.get("job_query"):
+        parts.append(f"岗位：{talent_request['job_query']}")
+    for item in talent_request.get("semantic_requirements") or []:
+        if isinstance(item, dict) and item.get("query"):
+            parts.append(str(item["query"]))
+    return "；".join(parts) or "（未提供原始需求）"
+
+
+def _await_dimension_decision(payload: dict[str, Any]) -> dict[str, Any]:
+    """等待用户补充维度要求或取消；载荷错误时把错误回显并继续等待。"""
+    while True:
+        decision = interrupt(payload)
+        try:
+            if not isinstance(decision, dict):
+                raise ValueError("恢复数据必须是 JSON 对象")
+            if decision.get("interaction_id") != payload.get("interaction_id"):
+                raise ValueError("交互编号与当前暂停点不匹配")
+            action = decision.get("action")
+            if action == "cancel":
+                return {"action": "cancel"}
+            if action != "revise":
+                raise ValueError("action 必须是 revise 或 cancel")
+            revision_text = decision.get("revision_text")
+            if not isinstance(revision_text, str) or not revision_text.strip():
+                raise ValueError("revise 动作必须携带非空 revision_text")
+            return {"action": "revise", "revision_text": revision_text.strip()}
+        except ValueError as exc:
+            payload = {**payload, "resume_error": str(exc)}
+
+
+def _request_dimension_revision(state: TalentEvaluationDispatchState) -> dict[str, Any]:
+    """中断节点：维度不可用时请用户补充评估要求，或取消本次任务。"""
+    round_no = int(state.get("dimension_revision_round", 0))
+    issues = state.get("validation_issues") or []
+    detail = "；".join(str(item.get("message", "")) for item in issues if isinstance(item, dict))
+    payload = {
+        "type": "requirement_revision",
+        "interaction_id": f"dr-v{round_no}",
+        "reason_code": "dimension_unavailable",
+        "blocking_reason": f"当前要求不足以生成可评估的维度：{detail}" if detail else "当前要求不足以生成可评估的维度",
+        "question": "请补充评估维度或调整人才要求后重新生成，或取消本次任务",
+        "request_text": _revision_request_text(state),
+        "request_source": "user_request",
+        "actions": ["revise", "cancel"],
+    }
+    decision = _await_dimension_decision(payload)
+    if decision["action"] == "cancel":
+        return {"status": "cancelled", "errors": ["用户取消：评估维度不可用"]}
+    logger.info(
+        "event=dimension_revision_received function=request_dimension_revision "
+        "round=%s revision_chars=%s",
+        round_no + 1, len(decision["revision_text"]),
+    )
+    return {
+        "status": "dimension_revision_received",
+        "dimension_revision": decision["revision_text"],
+        "dimension_revision_round": round_no + 1,
+    }
+
+
+def _route_after_dimension_revision(
+    state: TalentEvaluationDispatchState,
+) -> Literal["generate_dimensions", "stop"]:
+    return "stop" if state.get("status") == "cancelled" else "generate_dimensions"
+
+
 def _route_dimension_validation(
     state: TalentEvaluationDispatchState,
-) -> Literal["retrieve_candidates", "prepare_work_items", "dimension_invalid"]:
+) -> Literal[
+    "retrieve_candidates",
+    "prepare_work_items",
+    "dimension_invalid",
+    "request_dimension_revision",
+]:
     """根据维度验证结果路由。"""
     if state.get("validation_issues"):
+        if int(state.get("dimension_revision_round", 0)) < DIMENSION_REVISION_LIMIT:
+            return "request_dimension_revision"
         return "dimension_invalid"
     if state.get("candidates_preselected"):
         return "prepare_work_items"
@@ -876,6 +993,7 @@ def build_talent_evaluation_dispatch_graph(
     candidate_provider: CandidateProvider,
     branch_worker: BranchWorker,
     max_work_items: int = 24,
+    checkpointer: Any | None = None,
 ):
     if max_work_items < 1:
         raise ValueError("max_work_items 必须大于等于 1")
@@ -891,6 +1009,7 @@ def build_talent_evaluation_dispatch_graph(
     builder.add_node("run_assessment_branch", _run_assessment_branch(branch_worker))
     builder.add_node("finalize", _finalize)
     builder.add_node("dimension_invalid", _dimension_invalid)
+    builder.add_node("request_dimension_revision", _request_dimension_revision)
     builder.add_node("no_candidates", _no_candidates)
     builder.add_node("capacity_exceeded", _capacity_exceeded)
     builder.add_edge(START, "receive_input")
@@ -899,6 +1018,12 @@ def build_talent_evaluation_dispatch_graph(
     builder.add_conditional_edges(
         "validate_dimensions",
         _route_dimension_validation,
+        ["retrieve_candidates", "prepare_work_items", "dimension_invalid", "request_dimension_revision"],
+    )
+    builder.add_conditional_edges(
+        "request_dimension_revision",
+        _route_after_dimension_revision,
+        {"generate_dimensions": "generate_dimensions", "stop": END},
     )
     builder.add_edge("retrieve_candidates", "prepare_work_items")
     builder.add_conditional_edges(
@@ -911,4 +1036,4 @@ def build_talent_evaluation_dispatch_graph(
     builder.add_edge("dimension_invalid", END)
     builder.add_edge("no_candidates", END)
     builder.add_edge("capacity_exceeded", END)
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer) if checkpointer is not None else builder.compile()
